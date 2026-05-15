@@ -304,7 +304,11 @@ def _render_one(
     if not ass_path.exists():
         # words_for_clip is already in trimmed-timeline coordinates
         # (zero-based); see _prepare_clip_assets → prepare_trimmed_clip.
-        ass_path.write_text(build_ass(words_for_clip, variant, res, 0.0))
+        # `recommendation` is the Decision dict (Phase 2); when present it
+        # overrides caption position/size/color per-clip.
+        ass_path.write_text(
+            build_ass(words_for_clip, variant, res, 0.0, decision=recommendation)
+        )
 
     # Hero aspect's 'full' frame_style gets the _hero suffix.
     is_hero = (

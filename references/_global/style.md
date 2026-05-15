@@ -11,7 +11,8 @@ automatically. No code edits required.
 
 ## Captions
 
-- captions centered horizontally
+- horizontal: centered horizontally in the frame
+- vertical: lower third (below the speaker's face) — default for talking-head and reaction content
 - avoid facecam overlap (captions must not cover detected faces)
 - max 2 lines
 - minimum font size 70 px

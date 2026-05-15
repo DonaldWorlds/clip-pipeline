@@ -21,10 +21,12 @@ import sys
 from pathlib import Path
 
 from clip_pipeline import config as cfg
-from clip_pipeline import intelligence, source, thumbnail
+from clip_pipeline import source, thumbnail
 from clip_pipeline.analyze import detect, framing, whisper
 from clip_pipeline.editorial import copy as post_copy
+from clip_pipeline.editorial import decisions as editorial_decisions
 from clip_pipeline.render import pool as render
+from clip_pipeline.validate import editorial as editorial_validate
 from clip_pipeline.validate import technical as verify
 
 
@@ -54,6 +56,13 @@ def main():
     ap.add_argument("--top-n", type=int, help="Override job['top_n'].")
     ap.add_argument("--keep-temp", action="store_true",
                     help="Retain .work/ intermediates after success.")
+    ap.add_argument(
+        "--verify-before-render",
+        action="store_true",
+        help="(Phase 2) Vision sanity-check each clip's decision BEFORE rendering. "
+             "Saves time on clips that would fail editorial validation anyway. "
+             "Pegasus free tier. Off by default.",
+    )
     args = ap.parse_args()
 
     cfg.load_env()
@@ -118,10 +127,12 @@ def main():
     # the streamer-overlay composite path entirely.
     framings = framing.analyze(job, src_path, selected, source_profile)
 
-    # 4.75. Variant Intelligence: per-clip render parameter decisions.
-    recs = intelligence.recommend(job, selected, framings)
+    # 4.75. Editorial decisions: per-clip render parameter decisions, grounded
+    # in references/_global/style.md (loaded by editorial.rules).
+    decisions = editorial_decisions.decide_all(job, selected, framings)
+    recs = editorial_decisions.as_dict(decisions)
 
-    # 5. Render every (clip × variant × aspect), parameterized by intelligence.
+    # 5. Render every (clip × variant × aspect), parameterized by decisions.
     produced = render.render_all(job, src_path, words, selected, framings,
                                  variants, recs)
     print(f"[cut] rendered {len(produced)} MP4s", file=sys.stderr)
@@ -136,17 +147,30 @@ def main():
     posts = post_copy.generate_all(job, selected)
     print(f"[cut] post copy generated for {len(posts)} clip(s)", file=sys.stderr)
 
-    # 6. Verification.
+    # 6a. Technical verification (ffprobe + still-frame).
     report = verify.run(job, produced)
-    print(f"[cut] verify: {report['summary']}", file=sys.stderr)
+    print(f"[cut] verify (technical): {report['summary']}", file=sys.stderr)
 
-    if not args.keep_temp and not report["failures"]:
+    # 6b. Editorial verification (rules-compliance + Pegasus vision QC).
+    editorial_report = editorial_validate.run(job, produced, decisions)
+    print(f"[cut] verify (editorial): {editorial_report['summary']}", file=sys.stderr)
+
+    has_failures = bool(report["failures"]) or editorial_report["summary"]["failed"] > 0
+
+    if not args.keep_temp and not has_failures:
         import shutil
         shutil.rmtree(job.work_dir, ignore_errors=True)
 
-    if report["failures"]:
-        sys.exit(f"verification failed for {len(report['failures'])} output(s); "
-                 f"see {job.output_dir / 'report.json'}")
+    if has_failures:
+        msgs = []
+        if report["failures"]:
+            msgs.append(f"technical failures: {len(report['failures'])}")
+        if editorial_report["summary"]["failed"]:
+            msgs.append(f"editorial failures: {editorial_report['summary']['failed']}")
+        sys.exit(
+            f"verification failed ({'; '.join(msgs)}); "
+            f"see {job.output_dir}/report.json and editorial_report.json"
+        )
 
 
 if __name__ == "__main__":
