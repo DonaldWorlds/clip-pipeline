@@ -107,7 +107,7 @@ TWELVELABS_PAGE_LIMIT = 10
 TWELVELABS_MIN_RANK_SCORE = 0.15  # candidates below this drop (was 0.30; too strict on short/B-roll content)
 # Floor: if score-filtering kills everything, keep at least this many of the
 # highest-scoring raw moments anyway so the pipeline always produces output.
-TWELVELABS_FALLBACK_KEEP = 10
+TWELVELABS_FALLBACK_KEEP = 30   # Phase 5b: give the re-ranker more raw material
 
 
 def _twelvelabs_client():
@@ -232,7 +232,7 @@ def _twelvelabs_search(client, index_id: str, video_id: str) -> list[dict]:
     return moments
 
 
-PEGASUS_PICK_MOMENTS_PROMPT = """You are watching a long-form video. Identify the top 10 best moments to clip for short-form social posts.
+PEGASUS_PICK_MOMENTS_PROMPT = """You are watching a long-form video. Identify the top 30 best moments to clip for short-form social posts. Be generous — return all plausibly-good moments; a downstream re-ranker will narrow to the best few.
 
 Judge by:
 - emotional peaks

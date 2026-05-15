@@ -28,7 +28,7 @@ from pathlib import Path
 from clip_pipeline import config as cfg
 from clip_pipeline import profile as profile_mod
 from clip_pipeline import source
-from clip_pipeline.analyze import detect, framing, whisper
+from clip_pipeline.analyze import detect, framing, moment_intelligence, whisper
 from clip_pipeline.editorial import copy as post_copy
 from clip_pipeline.editorial import decisions as editorial_decisions
 from clip_pipeline.rag import retrieve as rag_retrieve
@@ -74,6 +74,13 @@ def main():
         help="Explicit escape hatch: render with floor defaults from "
              "references/_global/style.md (one 9:16 output per clip, neutral grade, "
              "no upscaling). Use for dev/demo runs with no client references yet.",
+    )
+    ap.add_argument(
+        "--no-moment-intelligence",
+        action="store_true",
+        help="(Phase 5b) Skip the RAG-driven candidate re-rank step. Pegasus's "
+             "original ordering decides top-N. Useful for A/B comparing reference-"
+             "conditioned selection against generic Pegasus taste.",
     )
     args = ap.parse_args()
 
@@ -139,6 +146,13 @@ def main():
     print(f"[cut] {len(cands)} candidates", file=sys.stderr)
     if not cands:
         sys.exit("no candidates produced; refusing to render")
+
+    # 3.5. Phase 5b — Moment Intelligence re-rank. Off in --quickstart mode
+    # (no client refs to compare against) or when explicitly overridden.
+    if args.client and not args.no_moment_intelligence:
+        cands = moment_intelligence.rerank(
+            job, cands, words, args.client, profile,
+        )
 
     # 4. Top-N selection.
     selected = _select_top_n(cands, job.top_n)

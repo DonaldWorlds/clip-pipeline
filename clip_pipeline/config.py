@@ -69,13 +69,18 @@ class Word:
 
 @dataclass
 class Candidate:
-    """One detected moment. Output of Stage 3 (either backend)."""
+    """One detected moment. Output of Stage 3 (either backend). Phase 5b
+    moment-intelligence re-rank populates the trailing three fields when
+    --client is set and the client has ingested references."""
     id: str
     start: float
     end: float
     score: float
     rationale: str = ""
     topic: str = ""
+    reference_fit_score: float = 0.0
+    reference_ids_matched: list = field(default_factory=list)
+    score_breakdown: dict = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, d: dict) -> "Candidate":
@@ -86,6 +91,9 @@ class Candidate:
             score=float(d["score"]),
             rationale=str(d.get("rationale", "")),
             topic=str(d.get("topic", "")),
+            reference_fit_score=float(d.get("reference_fit_score", 0.0)),
+            reference_ids_matched=list(d.get("reference_ids_matched") or []),
+            score_breakdown=dict(d.get("score_breakdown") or {}),
         )
 
 
