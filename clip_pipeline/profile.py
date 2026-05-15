@@ -67,7 +67,6 @@ class ClientStyleProfile:
     caption: CaptionStyle = field(default_factory=CaptionStyle)
     color_grade: ColorGrade = field(default_factory=ColorGrade)
 
-    frame_style: str = "edge_to_edge"    # edge_to_edge | inset
     use_upscaling: bool = False
     generate_post_copy: bool = True
 
@@ -88,7 +87,6 @@ class ClientStyleProfile:
             typical_clip_length_s=float(raw.get("typical_clip_length_s", 15.0)),
             caption=CaptionStyle(**cap) if cap else CaptionStyle(),
             color_grade=ColorGrade(**cg) if cg else ColorGrade(),
-            frame_style=raw.get("frame_style", "edge_to_edge"),
             use_upscaling=bool(raw.get("use_upscaling", False)),
             generate_post_copy=bool(raw.get("generate_post_copy", True)),
             source_fingerprint_ids=list(raw.get("source_fingerprint_ids") or []),
@@ -168,6 +166,46 @@ def load(client: str | None) -> ClientStyleProfile:
     return prof
 
 
+def load_strict(client: str) -> ClientStyleProfile:
+    """Production-mode loader: hard fail if the client has no profile and no
+    derivable references. Use this when --client is supplied and the user
+    expects the pipeline to refuse to render mediocre output for a client
+    that hasn't been onboarded.
+
+    Resolution order (no soft floor fallback):
+      1. references/<client>/profile.json (if present)
+      2. derive from references/<client>/*.mp4 fingerprints (≥ MIN_REFS)
+      3. sys.exit with onboarding instructions
+    """
+    pj = profile_path_for(client)
+    if pj.is_file():
+        try:
+            prof = ClientStyleProfile.from_dict(json.loads(pj.read_text()))
+            print(f"[profile] loaded {pj} ({prof.n_references} refs)", file=sys.stderr)
+            return prof
+        except Exception as e:
+            print(f"[profile] {pj} unreadable: {e}", file=sys.stderr)
+
+    prof = derive_from_references(client)
+    if prof is not None:
+        save(prof)
+        return prof
+
+    refs_dir = REFS_ROOT / client
+    sys.exit(
+        f"no profile and < {MIN_REFS_FOR_DERIVATION} ingested references for "
+        f"client={client!r}.\n"
+        f"  Expected:    {pj}\n"
+        f"  Refs dir:    {refs_dir} ({'exists' if refs_dir.is_dir() else 'missing'})\n"
+        f"\n"
+        f"To onboard this client, ingest reference clips first:\n"
+        f"  python -m clip_pipeline.rag.ingest --client {client}\n"
+        f"\n"
+        f"Or, for a dev/demo run with floor defaults, use --quickstart instead "
+        f"of --client."
+    )
+
+
 def save(profile: ClientStyleProfile) -> Path:
     pj = profile_path_for(profile.client)
     pj.parent.mkdir(parents=True, exist_ok=True)
@@ -217,9 +255,11 @@ def derive_from_references(client: str) -> ClientStyleProfile | None:
 
     visuals = [f.get("visual", {}) for f in fps if f.get("visual")]
     if visuals:
+        from collections import Counter
         brightness = median([float(v.get("avg_brightness", 128.0)) for v in visuals])
         temps = [v.get("color_temp", "neutral") for v in visuals]
-        temp = max(set(temps), key=temps.count)
+        # Counter.most_common is deterministic on ties (insertion order)
+        temp = Counter(temps).most_common(1)[0][0]
     else:
         brightness = floor.color_grade.brightness_target
         temp = floor.color_grade.color_temp
@@ -263,7 +303,6 @@ def derive_from_references(client: str) -> ClientStyleProfile | None:
             contrast_target=1.0,
             color_temp=temp,
         ),
-        frame_style="edge_to_edge",  # always edge-to-edge for now (no inset-blur)
         use_upscaling=use_upscaling,
         generate_post_copy=True,
         source_fingerprint_ids=[str(f.get("id", "?")) for f in fps],

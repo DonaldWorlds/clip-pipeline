@@ -66,15 +66,14 @@ def main():
         "--client",
         help="Client name. Resolves to references/<client>/profile.json — the "
              "ClientStyleProfile that drives caption / aspect / color / upscaling. "
-             "If omitted, the pipeline uses the global floor from "
-             "references/_global/style.md (one 9:16 output per clip, neutral grade).",
+             "REQUIRED unless --quickstart is used.",
     )
     ap.add_argument(
-        "--verify-before-render",
+        "--quickstart",
         action="store_true",
-        help="Vision sanity-check each clip's decision BEFORE rendering. "
-             "Saves time on clips that would fail editorial validation anyway. "
-             "Pegasus free tier. Off by default.",
+        help="Explicit escape hatch: render with floor defaults from "
+             "references/_global/style.md (one 9:16 output per clip, neutral grade, "
+             "no upscaling). Use for dev/demo runs with no client references yet.",
     )
     args = ap.parse_args()
 
@@ -102,7 +101,24 @@ def main():
     job.output_dir.mkdir(parents=True, exist_ok=True)
     job.work_dir.mkdir(parents=True, exist_ok=True)
 
-    profile = profile_mod.load(args.client)
+    if not args.client and not args.quickstart:
+        sys.exit(
+            "no --client supplied. The pipeline is reference-conditioned: "
+            "every run targets a specific client whose references define the "
+            "style. Either:\n"
+            "  • pass --client <name> (requires references/<name>/ already "
+            "ingested via `python -m clip_pipeline.rag.ingest --client <name>`)\n"
+            "  • or pass --quickstart to render with floor defaults from "
+            "references/_global/style.md (dev/demo only)."
+        )
+    if args.client and args.quickstart:
+        sys.exit("--client and --quickstart are mutually exclusive.")
+
+    if args.client:
+        profile = profile_mod.load_strict(args.client)
+    else:
+        profile = profile_mod.load(None)
+        profile.client = "_quickstart"
 
     backend = cfg.resolve_detection_backend(job.detection_backend)
     print(f"[cut] backend={backend}, top_n={job.top_n}, "

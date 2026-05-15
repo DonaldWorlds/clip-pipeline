@@ -5,6 +5,5 @@
   "top_n": 3,
   "detection_backend": "auto",
   "llm_model": "llama3.1:8b",
-  "whisper_model": "small",
-  "variants": ["bloomberg", "tiktok_bro", "documentary"]
+  "whisper_model": "small"
 }

@@ -1,12 +1,13 @@
 """ASS subtitle builder. Captions are verbatim from whisper Word objects.
 
-Three caption modes (from variants.json):
+Three caption modes (from ClientStyleProfile.caption.mode, synthesized by
+render.pool._profile_to_caption_dict into a 'variant'-shaped dict):
   - lower_third  : short phrases in a bottom bar
   - karaoke_word : one word at a time, full-screen
   - subtitles    : traditional 2-line subtitles
 
-Phase 2: caption position, font size, and highlight color can be overridden
-per-clip via a Decision dict. The variant still controls font FAMILY, mode,
+Caption position, font size, and highlight color can be overridden per-clip
+via a Decision dict. The profile-synthesized dict controls font FAMILY, mode,
 border, and animation; the Decision controls POSITION/SIZE/COLOR.
 """
 from __future__ import annotations

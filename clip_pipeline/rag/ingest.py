@@ -238,6 +238,18 @@ def ingest_inbox(client: str) -> int:
         if ingest_one(mp4, sidecar, client):
             n += 1
     print(f"[ingest] {client}: ingested {n} new reference(s)", file=sys.stderr)
+
+    # Update the ClientStyleProfile at ingest time (acceptance criterion #1).
+    # If the client now has ≥ MIN_REFS_FOR_DERIVATION fingerprints, derive a
+    # fresh profile.json so it's inspectable / editable BEFORE the first cut.py run.
+    from .. import profile as profile_mod
+    derived = profile_mod.derive_from_references(client)
+    if derived is not None:
+        profile_mod.save(derived)
+    else:
+        print(f"[ingest] {client}: profile not yet derivable "
+              f"(need ≥{profile_mod.MIN_REFS_FOR_DERIVATION} refs)", file=sys.stderr)
+
     return n
 
 

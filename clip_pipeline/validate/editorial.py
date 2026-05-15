@@ -40,6 +40,9 @@ from ..editorial.rules import EditorialRules, load as load_rules
 CAPTION_Y_TOLERANCE = 0.06     # actual vs target y_fraction, allow ±6% of frame height
 FACE_OVERLAP_PCT_LIMIT = 0.10  # captions cover >10% of face bbox = violation
 VISION_FRAME_POSITIONS = (0.10, 0.50, 0.90)
+PROFILE_BRIGHTNESS_TOLERANCE = 15.0   # mean luminance, ±15 on 0-255 scale
+PROFILE_CAPTION_Y_TOLERANCE = 0.05    # profile.caption.y_frac vs rendered, ±5% of frame
+ASPECT_SLUG_TO_NAME = {"9x16": "9:16", "1x1": "1:1", "16x9": "16:9"}
 
 
 @dataclass
@@ -169,6 +172,126 @@ def _mechanical_checks(
             seconds_saved = trim_report.get("seconds_saved", 0.0)
             obeyed.append(f"filler_silence_trim (cut {seconds_saved:.1f}s)")
     # If trim report missing, don't fail — trim is optional.
+
+    return obeyed, violated
+
+
+# ---------- profile comparison checks ----------
+
+def _sample_brightness_and_temp(out_path: Path) -> tuple[float, str] | None:
+    """Sample 3 frames from the rendered output and compute mean luminance
+    + dominant color temperature. Returns None if the file can't be read."""
+    try:
+        import cv2
+    except ImportError:
+        return None
+    cap = cv2.VideoCapture(str(out_path))
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    if total <= 0:
+        cap.release()
+        return None
+    samples = []
+    for pos in (0.20, 0.50, 0.80):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(total * pos))
+        ok, frame = cap.read()
+        if ok and frame is not None:
+            samples.append(frame)
+    cap.release()
+    if not samples:
+        return None
+
+    import numpy as np
+    grays = [cv2.cvtColor(f, cv2.COLOR_BGR2GRAY) for f in samples]
+    brightness = float(np.mean([np.mean(g) for g in grays]))
+
+    mean_b = float(np.mean([np.mean(f[:, :, 0]) for f in samples]))
+    mean_r = float(np.mean([np.mean(f[:, :, 2]) for f in samples]))
+    if mean_r - mean_b > 8:
+        temp = "warm"
+    elif mean_b - mean_r > 8:
+        temp = "cool"
+    else:
+        temp = "neutral"
+    return brightness, temp
+
+
+def _profile_checks(
+    out_path: Path,
+    ass_path: Path,
+    profile,
+) -> tuple[list[str], list[dict]]:
+    """Four profile-conformance checks (spec §4.3):
+       1. rendered aspect ∈ profile.delivery_aspects
+       2. rendered caption_y_frac within ±0.05 of profile.caption.y_frac
+       3. rendered avg_brightness within ±15 of profile.color_grade.brightness_target
+       4. rendered color_temp matches profile.color_grade.color_temp
+    Returns (obeyed, violated). All four are no-ops when profile is None.
+    """
+    obeyed: list[str] = []
+    violated: list[dict] = []
+    if profile is None:
+        return obeyed, violated
+
+    # 1. Aspect ∈ profile.delivery_aspects.
+    # Filename is "<clip_id>_<aspect_slug>.mp4" — e.g. "01_9x16.mp4".
+    parts = out_path.stem.split("_")
+    slug = parts[-1] if len(parts) >= 2 else ""
+    aspect = ASPECT_SLUG_TO_NAME.get(slug, "")
+    if aspect and aspect in profile.delivery_aspects:
+        obeyed.append(f"profile.aspect ({aspect} in {profile.delivery_aspects})")
+    elif aspect:
+        violated.append({
+            "rule": "profile.delivery_aspects",
+            "expected": profile.delivery_aspects,
+            "observed": aspect,
+        })
+
+    # 2. Caption y_frac directly against profile (not just the Decision).
+    style = _parse_ass_style(ass_path)
+    if style:
+        actual_y = _y_fraction_from_ass(style)
+        target_y = profile.caption.y_frac
+        if abs(actual_y - target_y) <= PROFILE_CAPTION_Y_TOLERANCE:
+            obeyed.append(
+                f"profile.caption.y_frac ({actual_y:.2f} vs target {target_y:.2f}, "
+                f"±{PROFILE_CAPTION_Y_TOLERANCE})"
+            )
+        else:
+            violated.append({
+                "rule": "profile.caption.y_frac",
+                "expected": round(target_y, 2),
+                "observed": round(actual_y, 2),
+                "tolerance": PROFILE_CAPTION_Y_TOLERANCE,
+            })
+
+    # 3 + 4 — sample the rendered output for brightness + color_temp.
+    sample = _sample_brightness_and_temp(out_path)
+    if sample is None:
+        return obeyed, violated
+    brightness, temp = sample
+
+    target_b = profile.color_grade.brightness_target
+    if abs(brightness - target_b) <= PROFILE_BRIGHTNESS_TOLERANCE:
+        obeyed.append(
+            f"profile.brightness ({brightness:.1f} vs target {target_b:.1f}, "
+            f"±{PROFILE_BRIGHTNESS_TOLERANCE})"
+        )
+    else:
+        violated.append({
+            "rule": "profile.color_grade.brightness_target",
+            "expected": f"{target_b:.1f} ± {PROFILE_BRIGHTNESS_TOLERANCE}",
+            "observed": round(brightness, 1),
+        })
+
+    target_temp = profile.color_grade.color_temp
+    if temp == target_temp:
+        obeyed.append(f"profile.color_temp ({temp})")
+    else:
+        violated.append({
+            "rule": "profile.color_grade.color_temp",
+            "expected": target_temp,
+            "observed": temp,
+        })
 
     return obeyed, violated
 
@@ -330,6 +453,14 @@ def run(
 
         decision = decisions_by_id.get(clip_id, {})
         obeyed, violated = _mechanical_checks(out_path, ass_path, decision, rules, trim_report)
+
+        # Profile-conformance checks (Phase 5a §4.3): aspect, caption y_frac,
+        # brightness, color_temp — all measured against the loaded
+        # ClientStyleProfile, not just the per-clip Decision.
+        prof_obeyed, prof_violated = _profile_checks(out_path, ass_path, profile)
+        obeyed.extend(prof_obeyed)
+        violated.extend(prof_violated)
+
         vision_findings, more_violations = _vision_check(out_path, job)
         violated.extend(more_violations)
 

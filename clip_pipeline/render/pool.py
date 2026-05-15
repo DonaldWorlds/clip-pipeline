@@ -311,13 +311,21 @@ def _render_one(
         ]
         _run(cmd)
     else:
+        # Simple-aspect path. When the profile enabled upscaling AND there
+        # is no speaker-rect composite, the enhanced full-frame video
+        # becomes the visual input; audio still comes from the original clip
+        # because enhance.py strips audio (silent .enhanced.mp4).
+        enhanced_path = job.work_dir / f"{cand.id}.enhanced.mp4"
+        use_enhanced_source = want_esrgan and enhanced_path.exists()
+
         filters = []
         if framing.zoom.get("enabled"):
             fps = _probe_fps(clip_path)
             duration = cand.end - cand.start
             filters.append(_zoompan_filter(framing, fps, duration))
 
-        src_w, src_h = _probe_source_dims(clip_path)
+        visual_input = enhanced_path if use_enhanced_source else clip_path
+        src_w, src_h = _probe_source_dims(visual_input)
         filters.append(_simple_aspect_filter(
             aspect, crop_tightness=crop_tightness,
             speaker_rect=speaker_rect, src_w=src_w, src_h=src_h,
@@ -328,16 +336,34 @@ def _render_one(
             filters.append(grade_filter)
         filters.append(f"ass={_escape_ass_filter_path(ass_path)}")
         vf = ",".join(filters)
-        _run([
-            "ffmpeg", "-y",
-            "-i", str(clip_path),
-            "-vf", vf,
-            "-af", LOUDNORM_FILTER,
-            "-c:v", "libx264", "-preset", "medium", "-crf", str(crf),
-            "-c:a", "aac", "-b:a", "192k",
-            "-movflags", "+faststart",
-            str(out_path),
-        ])
+
+        if use_enhanced_source:
+            # Two-input ffmpeg: [0:v] = enhanced (silent) → -vf chain,
+            # [1:a] = original clip's audio track.
+            _run([
+                "ffmpeg", "-y",
+                "-i", str(enhanced_path),
+                "-i", str(clip_path),
+                "-vf", vf,
+                "-map", "0:v",
+                "-map", "1:a",
+                "-af", LOUDNORM_FILTER,
+                "-c:v", "libx264", "-preset", "medium", "-crf", str(crf),
+                "-c:a", "aac", "-b:a", "192k",
+                "-movflags", "+faststart",
+                str(out_path),
+            ])
+        else:
+            _run([
+                "ffmpeg", "-y",
+                "-i", str(clip_path),
+                "-vf", vf,
+                "-af", LOUDNORM_FILTER,
+                "-c:v", "libx264", "-preset", "medium", "-crf", str(crf),
+                "-c:a", "aac", "-b:a", "192k",
+                "-movflags", "+faststart",
+                str(out_path),
+            ])
 
     return out_path
 
@@ -351,9 +377,17 @@ def _prepare_clip_assets(
     words_in_source: list[Word],
     profile: ClientStyleProfile,
 ) -> list[Word]:
-    """Serial prep: extract, trim, optionally ESRGAN-enhance the speaker
-    region. Returns the word list re-timed to the trimmed clip's zero-based
-    timeline."""
+    """Serial prep: extract, trim, optionally ESRGAN-enhance. Returns the
+    word list re-timed to the trimmed clip's zero-based timeline.
+
+    ESRGAN gate is purely profile-driven: if `profile.use_upscaling` is True
+    AND `recommendation.use_esrgan` agrees, we enhance. For overlay/multi-
+    subject sources we pass the speaker_rect (subject-region enhancement);
+    for everything else we pass a full-frame synthetic rect so the whole
+    frame gets upscaled. The render path consumes the .enhanced.mp4 either
+    as the foreground of the composite filter (overlay) or as the direct
+    ffmpeg input (simple aspect crop).
+    """
     clip_path = job.work_dir / f"{cand.id}.mp4"
     _extract_clip(source, cand, clip_path)
 
@@ -363,15 +397,14 @@ def _prepare_clip_assets(
 
     if not (profile.use_upscaling and recommendation.get("use_esrgan", False)):
         return words_trimmed
-    if framing.cls not in ("overlay", "multi_subject"):
-        return words_trimmed
-    speaker_rect = (
-        framing.signals.get("speaker_rect")
-        if isinstance(framing.signals, dict)
-        else None
-    )
+
+    sig = framing.signals if isinstance(framing.signals, dict) else {}
+    speaker_rect = sig.get("speaker_rect")
     if not speaker_rect:
-        return words_trimmed
+        # Full-frame enhancement: synthesize a rect spanning the whole frame.
+        src_w, src_h = _probe_source_dims(clip_path)
+        speaker_rect = {"x": 0, "y": 0, "w": src_w, "h": src_h}
+
     enhance_speaker_region(
         clip_path, speaker_rect, cand.id, job.work_dir,
         blend=float(recommendation.get("esrgan_blend", 0.65)),
@@ -386,7 +419,7 @@ def render_all(
     selected: list[Candidate],
     framings: list[Framing],
     profile: ClientStyleProfile,
-    intelligence: dict,
+    decisions_by_id: dict,
 ) -> list[Path]:
     job.output_dir.mkdir(parents=True, exist_ok=True)
     job.work_dir.mkdir(parents=True, exist_ok=True)
@@ -402,7 +435,7 @@ def render_all(
         framing = framing_by_id[cand.id]
         if framing.dropped:
             continue
-        rec = intelligence.get(cand.id, {})
+        rec = decisions_by_id.get(cand.id, {})
         words_for_clip = words_in_range(words, cand.start, cand.end)
         words_trimmed = _prepare_clip_assets(
             job, source, cand, framing, rec, words_for_clip, profile,
@@ -418,7 +451,7 @@ def render_all(
                   file=sys.stderr)
             continue
 
-        rec = intelligence.get(cand.id, {})
+        rec = decisions_by_id.get(cand.id, {})
         words_for_clip = per_clip_words.get(cand.id, [])
 
         for aspect in profile.delivery_aspects:

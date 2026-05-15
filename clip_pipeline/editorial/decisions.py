@@ -116,10 +116,19 @@ def _decide_one(
         d.crf = 20
         notes.append("class=no_subject → preserve original framing")
 
-    # ---- upscaling gate: profile-driven, not framing-class-driven ----
-    if profile is not None and profile.use_upscaling and framing.cls in ("overlay", "multi_subject"):
+    # ---- upscaling: PURELY profile-driven creative preference. ----
+    # Shape signals (framing.cls) are not quality signals; mixing them is a
+    # category error. A future technical-quality validator gates compute
+    # justification (bitrate, source blur, face resolution) — separately.
+    if profile is not None and profile.use_upscaling:
         d.use_esrgan = True
-        d.esrgan_blend = 0.65 if framing.cls == "overlay" else 0.55
+        # Lower blend when there's no isolated subject region; pure ESRGAN can
+        # over-smooth full-frame skin tones, so we blend more bicubic back in
+        # for full-frame shots. GFPGAN handles faces regardless.
+        if framing.cls in ("overlay", "multi_subject"):
+            d.esrgan_blend = 0.65
+        else:
+            d.esrgan_blend = 0.50
         notes.append(f"profile.use_upscaling=True → ESRGAN blend {d.esrgan_blend}")
 
     # ---- motion-driven adjustments ----

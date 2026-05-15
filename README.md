@@ -1,46 +1,41 @@
-# Clip Pipeline — AI editing for content creators
+# Clip Pipeline — reference-conditioned clip rendering for content creators
 
-You record long-form. We send back short-form, ready to post.
+You ingest a client's best short-form clips once. The pipeline learns their look. You feed in long-form source, get back ready-to-post short-form in that client's style — no manual editing, no per-clip variant matrix.
 
-## What you get
+## How it works
 
-For every video you send, **3 polished short clips** with:
+```
+references/<client>/*.mp4   (the Scout / your ingest brings these)
+        │
+        ▼
+   ingest fingerprints   ──►   ClientStyleProfile (rag.db + profile.json)
+                                       │
+   long-form source  ──►  picks top-N moments  ──►  applies the profile  ──►  finished MP4s
+```
 
-- **AI-picked moments** — the highlights worth posting, not random cuts.
-- **Verbatim captions** burned in, three caption styles (clean broadcast / punchy social / restrained editorial).
+**Critical principle:** style is learned from references; it is *not* a property of the pipeline. The pipeline is a delivery mechanism. References + `references/_global/style.md` (the floor) are the brain.
+
+## What you get per client
+
+For every long-form video you feed in, **N short clips × M delivery aspects**, where N is `--top-n` and M is the aspects the client's references actually use. Each output is:
+
+- **Reference-driven moment selection** — TwelveLabs Pegasus picks the candidates; future Phase 5b re-ranks by similarity to the client's reference fingerprints.
+- **Verbatim captions** burned in, with position / font / highlight color derived from the client's references (not a fixed catalog of "styles").
 - **Filler-word and dead-air trimmed.** No more "ums" and 2-second pauses.
-- **Audio normalized** to social-media broadcast standard (-14 LUFS — sounds professional on every platform).
-- **Color graded** per caption style (broadcast cool / TikTok pop / filmic flat).
-- **Three aspect ratios** when needed (9:16 for TikTok/Reels/Shorts, 1:1 for Insta feed, 16:9 for YouTube long-form). For phone-vertical sources we deliver vertical only — and in **two looks**: edge-to-edge and "inset blur" (the polished look creators pay editors for).
+- **Audio normalized** to -14 LUFS (TikTok/Reels/Shorts standard).
+- **Color graded** from the client's `profile.color_grade` (brightness, saturation, contrast, temperature — all derived from reference fingerprints).
+- **Aspect ratios** = `profile.delivery_aspects` (whatever the client's refs use; most clients = `["9:16"]`).
 - **Auto-zoom on static talking-head shots** so sitting-still clips don't feel like screenshots.
-- **Real-ESRGAN + GFPGAN face restoration** when the source needs it (streamer-style recordings, low-res phone footage). The subject stays sharp without the AI-plastic look.
-- **A thumbnail per clip** — best-face frame extracted automatically.
-- **Ready-to-paste social copy** — TikTok caption, Instagram caption, YouTube description, and 5-7 hashtags per clip.
+- **Real-ESRGAN + GFPGAN** — gated on `profile.use_upscaling` (derived from whether the client's references look enhanced). When on, it runs full-frame or speaker-region depending on shot type.
+- **Social post copy** — TikTok / Instagram / YouTube captions + hashtags, gated on `profile.generate_post_copy`.
 
-## Turnaround
-
-Phone-vertical source, ~10 minutes long → **~5 minutes** per finished clip pack.
-Landscape source with streamer-overlay treatment (face restoration + composites) → **~12-15 minutes** per finished clip pack.
-
-First time a particular source is processed, add ~5-10 minutes for AI indexing — cached after.
+No thumbnails by default (short-form platforms auto-pick frames). No inset-blur composite. No "Bloomberg/TikTok-bro/Documentary" variant matrix.
 
 ## Workflow
 
-1. You hand over the long-form (file or YouTube URL).
-2. We process it locally on Apple Silicon (faster-whisper, OpenCV, ffmpeg, ESRGAN/GFPGAN) with TwelveLabs for moment detection.
-3. You get a delivery folder per clip:
-   - `01_bloomberg_9x16.mp4` — broadcast style
-   - `01_tiktok_bro_9x16.mp4` — social style
-   - `01_documentary_9x16.mp4` — editorial style
-   - `01_bloomberg_9x16_inset.mp4` — same, inset-blur look
-   - `01_thumb.jpg` — thumbnail
-   - `01_post.json` — caption copy ready to paste, per platform
-
-## Who it's for
-
-- Creators recording on phone who want to ship daily without an editor.
-- Podcasters who want clips from each episode without paying $50-200 per cut.
-- Streamers / reaction-content creators (we have a special pipeline that face-restores the small webcam overlay so it stays sharp at vertical aspects).
+1. **Onboard a client once** — ingest 3+ reference clips into `references/<client>/inbox/`, run ingest, profile.json is derived.
+2. **For each long-form video:** `python cut.py jobs/<j>.json --client <client> --source /path/to/video.mp4 --top-n 3`
+3. **Output:** `out/<job>/01_9x16.mp4`, `02_9x16.mp4`, `03_9x16.mp4` (one per moment, in the client's delivery aspects), plus optional `*_post.json` for social copy.
 
 ## Running it yourself
 
@@ -53,42 +48,52 @@ brew install ffmpeg
 #   TWELVELABS_API_KEY=tlk_...
 ```
 
-**Phone-vertical source (most content creators):**
+**Production mode (per-client, strict):**
 
 ```bash
-python cut.py jobs/phone_creator.json \
+# 1) Ingest reference clips for the client
+python -m clip_pipeline.rag.ingest <client_name>
+
+# 2) Cut a long-form source in that client's style
+python cut.py jobs/<j>.json --client <client_name> \
   --source /path/to/your-video.mp4 \
-  --top-n 3 --keep-temp
+  --top-n 3
 ```
 
-Output lands in `out/phone_creator/` — 3 styled clips × `_full` + `_inset` looks + thumbnail + post copy per clip.
+Fails fast if `--client` has no profile and < 3 ingested references — refusing to render mediocre output for an un-onboarded client.
 
-**Landscape source (streamer-style screen recordings, podcasts, interviews):**
+**Dev / demo mode (no client onboarding, floor defaults from style.md):**
 
 ```bash
-python cut.py jobs/myjob.json --source /path/to/source.mp4 --top-n 3 --keep-temp
+python cut.py jobs/<j>.json --quickstart \
+  --source /path/to/source.mp4 --top-n 3
 ```
 
-Output is 3 clips × 3 styles × multiple aspects + face-restored composites where appropriate.
+`--quickstart` and `--client` are mutually exclusive.
 
 ## What's in the box
 
-- Whisper full-video transcription with word-level timestamps
-- TwelveLabs Marengo for moment detection (visual + audio semantic search)
-- TwelveLabs Pegasus for social caption copy generation
-- OpenCV Haar cascade + HOG person detection for shot classification
-- Real-ESRGAN + GFPGAN for subject upscaling (used only when source is genuinely low-res)
-- Per-variant ffmpeg color grading (no external LUT files needed)
-- 4-way parallel ffmpeg render pool
+- **Whisper** full-video transcription with word-level timestamps
+- **TwelveLabs Pegasus** for moment detection (replaces a 7-query keyword search)
+- **TwelveLabs Pegasus** also for reference fingerprinting (hook / pacing / captions / payoff descriptions)
+- **OpenCV Haar + HOG** for shot classification
+- **Real-ESRGAN + GFPGAN** (profile-gated, not auto-on)
+- **Sentence-transformers (`all-MiniLM-L6-v2`)** for RAG retrieval embeddings
+- **SQLite** for the reference index at `data/rag.db`
+- **4-way parallel ffmpeg** render pool
 
-## Pricing (template)
+## Architecture (current)
 
-| Tier | Includes | Price |
+| Layer | Module | Status |
 |---|---|---|
-| Per-clip | 1 finished clip pack from a single source moment | $ _____ |
-| Per-source | 3 clips from one source, full deliverable | $ _____ |
-| Monthly retainer | Unlimited sources / N clips per month / N-day turnaround | $ _____ / mo |
+| 1. Reference Scout (n8n) | `docs/superpowers/n8n_templates/scout_template.json` | Phase 4 |
+| 2. Reference fingerprinting + RAG | `clip_pipeline/rag/fingerprint.py`, `ingest.py`, `retrieve.py` | Phase 3 |
+| 3. ClientStyleProfile derivation | `clip_pipeline/profile.py` | Phase 5a |
+| 4. Moment selection | `clip_pipeline/analyze/detect.py` (Pegasus); RAG-driven re-rank | Phase 5b (next) |
+| 5. Deterministic render | `clip_pipeline/render/pool.py` | Phase 5a |
+| 6. Validation (technical + profile-conformance) | `clip_pipeline/validate/{technical,editorial}.py` | Phase 5a |
 
 ## Spec / design docs
 
-[docs/superpowers/specs/2026-05-13-clip-pipeline-v2-design.md](docs/superpowers/specs/2026-05-13-clip-pipeline-v2-design.md)
+- [docs/superpowers/specs/2026-05-15-phase5a-client-style-profile-design.md](docs/superpowers/specs/2026-05-15-phase5a-client-style-profile-design.md) — current
+- [docs/superpowers/specs/2026-05-13-clip-pipeline-v2-design.md](docs/superpowers/specs/2026-05-13-clip-pipeline-v2-design.md) — superseded in part by 5a
