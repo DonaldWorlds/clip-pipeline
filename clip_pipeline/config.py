@@ -12,7 +12,6 @@ from dotenv import load_dotenv
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_VARIANTS_PATH = PROJECT_ROOT / "variants.json"
 
 ASPECT_RES = {
     "9:16": (1080, 1920),
@@ -111,7 +110,6 @@ class Job:
     detection_backend: str = "auto"  # auto | twelvelabs | local
     llm_model: str = "llama3.1:8b"
     whisper_model: str = "small"
-    variants: list = field(default_factory=lambda: ["bloomberg", "tiktok_bro", "documentary"])
 
     # Hash is computed once on first access then cached. Two reasons:
     # 1. Rehashing a multi-GB source file every time is wasteful.
@@ -173,17 +171,7 @@ def load_job(path: Path) -> Job:
         detection_backend=raw.get("detection_backend", "auto"),
         llm_model=raw.get("llm_model", "llama3.1:8b"),
         whisper_model=raw.get("whisper_model", "small"),
-        variants=raw.get("variants") or ["bloomberg", "tiktok_bro", "documentary"],
     )
-
-
-def load_variants(path: Path) -> dict:
-    raw = json.loads(path.read_text())
-    notice = raw.pop("_deprecated_notice", None)
-    if notice:
-        import sys as _sys
-        print(f"[variants] DEPRECATION: {notice}", file=_sys.stderr)
-    return raw
 
 
 # ---------- JSON cache helpers ----------

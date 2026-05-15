@@ -1,35 +1,47 @@
-"""Per-variant color grading filters.
+"""Color grading derived from the ClientStyleProfile.
 
-Each variant gets a small ffmpeg filter expression that slots into the -vf
-chain AFTER the aspect crop / composite and AFTER any sharpening, but BEFORE
-the caption burn-in. That ordering matters: it means the underlying footage
-takes on the variant's color identity while the captions stay at their brand
-color and don't get tinted.
-
-No .cube files / external assets. Pure ffmpeg built-ins so the pipeline
-stays self-contained. Swap in a `lut3d=path.cube` here if you want a custom
-LUT later.
+The pipeline does not have a color identity of its own. The client's reference
+clips define brightness, saturation, contrast, and temperature targets; this
+module turns those numeric targets into an ffmpeg filter expression that slots
+into the -vf chain AFTER the aspect crop and AFTER sharpening, BEFORE the
+caption burn-in.
 """
 from __future__ import annotations
 
-
-GRADE_FILTERS: dict[str, str] = {
-    # Slight desaturate + faint cool cast → broadcast-news polish.
-    "bloomberg":
-        "eq=contrast=1.05:saturation=0.85,"
-        "colorchannelmixer=bb=1.05:gg=1.0:rr=0.98",
-
-    # Punchy saturation + warm skin push → social-pop look.
-    "tiktok_bro":
-        "eq=contrast=1.10:saturation=1.20:gamma_r=0.95:gamma_b=1.05",
-
-    # Flat, slightly lifted blacks → restrained filmic.
-    "documentary":
-        "eq=contrast=0.97:saturation=0.92:gamma=1.05,"
-        "curves=preset=lighter",
-}
+from ..profile import ColorGrade
 
 
-def filter_for(variant_name: str) -> str | None:
-    """Return the ffmpeg filter expression for a variant, or None if unknown."""
-    return GRADE_FILTERS.get(variant_name)
+def build_grade_filter(grade: ColorGrade) -> str | None:
+    """Translate ColorGrade targets into an ffmpeg filter chain.
+
+    - brightness_target (0-255 mean luminance) → eq=brightness shift
+    - saturation_target (1.0 = neutral)         → eq=saturation
+    - contrast_target (1.0 = neutral)           → eq=contrast
+    - color_temp (warm/neutral/cool)            → colorchannelmixer tint
+
+    Returns None when the profile is purely neutral (no filter needed)."""
+    parts: list[str] = []
+
+    # eq= covers contrast + saturation in one expression.
+    eq_terms: list[str] = []
+    if abs(grade.contrast_target - 1.0) > 0.01:
+        eq_terms.append(f"contrast={grade.contrast_target:.2f}")
+    if abs(grade.saturation_target - 1.0) > 0.01:
+        eq_terms.append(f"saturation={grade.saturation_target:.2f}")
+    # Brightness shift: ffmpeg eq=brightness is -1.0..+1.0, neutral 0.
+    # Map our 0-255 target relative to 128 (mid-gray).
+    delta = (grade.brightness_target - 128.0) / 128.0
+    if abs(delta) > 0.02:
+        eq_terms.append(f"brightness={max(-1.0, min(1.0, delta)):.2f}")
+    if eq_terms:
+        parts.append("eq=" + ":".join(eq_terms))
+
+    # Color temperature: subtle channel-mixer push. Warm = +R/-B, cool = -R/+B.
+    if grade.color_temp == "warm":
+        parts.append("colorchannelmixer=rr=1.04:bb=0.97")
+    elif grade.color_temp == "cool":
+        parts.append("colorchannelmixer=rr=0.97:bb=1.04")
+
+    if not parts:
+        return None
+    return ",".join(parts)

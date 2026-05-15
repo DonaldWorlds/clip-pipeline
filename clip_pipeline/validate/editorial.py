@@ -291,8 +291,11 @@ def run(
     produced: list[Path],
     decisions: list[dict] | None = None,
     rules: EditorialRules | None = None,
+    profile=None,
 ) -> dict:
     """Run mechanical + vision editorial checks on every rendered output.
+    `profile` (ClientStyleProfile) is read alongside `rules` (style.md);
+    profile is the per-client ceiling, style.md is the floor.
     Writes editorial_report.json and returns the parsed report."""
     if rules is None:
         rules = load_rules()
@@ -308,8 +311,8 @@ def run(
     failures = 0
 
     for out_path in produced:
-        # Derive clip_id + variant + aspect from the filename
-        stem = out_path.stem  # e.g. "01_tiktok_bro_9x16" or "01_bloomberg_9x16_inset"
+        # Output filename is "<clip_id>_<aspect_slug>.mp4" — no variant segment.
+        stem = out_path.stem  # e.g. "01_9x16"
         parts = stem.split("_")
         clip_id = parts[0]
         # Try to find the matching .ass file

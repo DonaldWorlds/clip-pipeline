@@ -123,6 +123,44 @@ def retrieve(
     return out
 
 
+def list_fingerprints(client: str) -> list[dict]:
+    """Return every fingerprint row for this client as a plain dict.
+
+    Used by clip_pipeline.profile.derive_from_references() to build the
+    ClientStyleProfile. Embeddings are dropped; only the typed signatures and
+    durations are kept (that's all the profile derivation needs).
+    """
+    if not DB_PATH.exists():
+        return []
+    conn = sqlite3.connect(str(DB_PATH))
+    conn.row_factory = sqlite3.Row
+    cur = conn.execute(
+        "SELECT id, duration_s, pegasus_hook, pegasus_pacing, pegasus_captions, "
+        "pegasus_payoff, visual_signature, editorial_signature "
+        "FROM reference_clips WHERE client = ?",
+        (client,),
+    )
+    rows = [dict(r) for r in cur.fetchall()]
+    conn.close()
+
+    def _parse(s):
+        try:
+            return json.loads(s) if s else {}
+        except (json.JSONDecodeError, TypeError):
+            return {}
+
+    for r in rows:
+        r["visual"] = _parse(r.pop("visual_signature", None))
+        r["editorial"] = _parse(r.pop("editorial_signature", None))
+        r["pegasus"] = {
+            "hook": r.pop("pegasus_hook", "") or "",
+            "pacing": r.pop("pegasus_pacing", "") or "",
+            "captions": r.pop("pegasus_captions", "") or "",
+            "payoff": r.pop("pegasus_payoff", "") or "",
+        }
+    return rows
+
+
 def _to_ref(row: dict, score: float, t_score: float, d_score: float) -> RetrievedReference:
     def _parse(s):
         try:

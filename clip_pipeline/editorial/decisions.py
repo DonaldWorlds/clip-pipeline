@@ -33,15 +33,12 @@ class Decision:
     chain) and validate/editorial.py (rule-compliance check)."""
     clip_id: str
 
-    # Output shape
-    hero_aspect: str = "9:16"
-
     # Crop
     crop_tightness: float = 0.0           # 0=loose / preserve framing, 1=tight
     use_esrgan: bool = False
     esrgan_blend: float = 0.65
 
-    # Captions — these override what variants.json says, per clip.
+    # Captions — overrides the profile's caption defaults per-clip.
     caption_y_fraction: float = 0.85
     caption_font_px: int = 70
     caption_highlight_color: str = "yellow"
@@ -54,13 +51,10 @@ class Decision:
     crf: int = 20
     sharpen: float = 0.0
 
-    # Preferred variant — informational. Render still produces all variants.
-    preferred_variant: str | None = None
-
-    # Trace — list of "rule:X said Y; framing showed Z; therefore picked W"
+    # Trace
     rationale: str = ""
 
-    # Phase 3 hooks (kept here so the schema is stable across phases)
+    # Reference IDs that fed into this decision
     reference_ids_used: list[str] = field(default_factory=list)
 
 
@@ -69,6 +63,7 @@ def _decide_one(
     framing: Framing,
     rules: EditorialRules,
     references: list | None = None,    # Phase 3: list of ClipFingerprint
+    profile=None,                       # Phase 5a: ClientStyleProfile (optional)
 ) -> Decision:
     """Produce a Decision for ONE clip, grounded in rules + framing (+ refs)."""
     notes: list[str] = []
@@ -91,52 +86,41 @@ def _decide_one(
         f"hl={d.caption_highlight_color}"
     )
 
-    # ---- aspect + crop + enhance by framing class ----
+    # ---- crop tightness + crf by framing class (style-neutral signals) ----
     if framing.cls == "overlay":
-        sr_w = float(speaker_rect.get("w_frac", 0.0)) if speaker_rect else 0.0
-        sr_h = float(speaker_rect.get("h_frac", 0.0)) if speaker_rect else 0.0
-        d.hero_aspect = "9:16" if sr_w <= sr_h else "16:9"
         d.crop_tightness = 0.9
         d.crf = 17
-        # ESRGAN auto-on by class removed (Phase 5a Batch A). Upscaling is
-        # now a per-client decision; Batch B will gate this on
-        # ClientStyleProfile.use_upscaling.
-        d.preferred_variant = "tiktok_bro"
-        notes.append("class=overlay → tight crop to speaker_rect (no auto-ESRGAN)")
+        notes.append("class=overlay → tight crop to speaker_rect")
 
     elif framing.cls == "full_frame":
         sr_h = float(speaker_rect.get("h_frac", 0.0)) if speaker_rect else 0.0
         face_dominant = sr_h >= 0.5
-        d.hero_aspect = "9:16"
         d.crop_tightness = 0.75 if face_dominant else 0.6
         d.crf = 18 if (zoom_on or face_dominant) else 20
         d.sharpen = 0.4 if zoom_on else 0.0
-        d.preferred_variant = "bloomberg" if not static else "tiktok_bro"
         notes.append(f"class=full_frame{' (face dominant)' if face_dominant else ''}")
 
     elif framing.cls == "mid_shot":
-        d.hero_aspect = "9:16"
         d.crop_tightness = 0.6
         d.crf = 19
         d.sharpen = 0.3 if zoom_on else 0.0
-        d.preferred_variant = "bloomberg"
         notes.append("class=mid_shot")
 
     elif framing.cls == "multi_subject":
-        d.hero_aspect = "16:9"
         d.crop_tightness = 0.4
         d.crf = 18
-        # ESRGAN auto-on removed (Phase 5a Batch A). Gated on
-        # ClientStyleProfile.use_upscaling in Batch B.
-        d.preferred_variant = "documentary"
-        notes.append("class=multi_subject (no auto-ESRGAN)")
+        notes.append("class=multi_subject")
 
     else:  # no_subject
-        d.hero_aspect = "16:9"
         d.crop_tightness = 0.0
         d.crf = 20
-        d.preferred_variant = "documentary"
         notes.append("class=no_subject → preserve original framing")
+
+    # ---- upscaling gate: profile-driven, not framing-class-driven ----
+    if profile is not None and profile.use_upscaling and framing.cls in ("overlay", "multi_subject"):
+        d.use_esrgan = True
+        d.esrgan_blend = 0.65 if framing.cls == "overlay" else 0.55
+        notes.append(f"profile.use_upscaling=True → ESRGAN blend {d.esrgan_blend}")
 
     # ---- motion-driven adjustments ----
     if frame_diff > 20.0:
@@ -186,9 +170,13 @@ def decide_all(
     selected: list[Candidate],
     framings: list[Framing],
     references_by_clip: dict[str, list] | None = None,
+    profile=None,
 ) -> list[Decision]:
-    """Phase 2 entrypoint. Loads rules once, decides per-clip, caches to
-    decisions.json. `references_by_clip` is wired in by Phase 3 (RAG).
+    """Decide per-clip render parameters. Grounded in:
+       - profile (ClientStyleProfile): drives caption defaults + use_upscaling
+       - rules   (style.md):           the global floor
+       - framing:                       per-clip shot signals
+       - references_by_clip:            retrieved exemplars (when --client set)
     """
     cache = job.work_dir / "decisions.json"
     if cache.exists():
@@ -204,11 +192,11 @@ def decide_all(
         if f is None:
             continue
         refs = (references_by_clip or {}).get(cand.id)
-        d = _decide_one(cand, f, rules, references=refs)
+        d = _decide_one(cand, f, rules, references=refs, profile=profile)
         out.append(d)
-        print(f"[editorial] {d.clip_id}: hero={d.hero_aspect}, "
+        print(f"[editorial] {d.clip_id}: "
               f"caption_y={d.caption_y_fraction:.2f}, font={d.caption_font_px}px, "
-              f"crf={d.crf}, refs={len(d.reference_ids_used)}",
+              f"crf={d.crf}, esrgan={d.use_esrgan}, refs={len(d.reference_ids_used)}",
               file=sys.stderr)
         print(f"[editorial]   rationale: {d.rationale}", file=sys.stderr)
 
@@ -217,7 +205,6 @@ def decide_all(
 
 
 def as_dict(decisions: list[Decision]) -> dict[str, dict]:
-    """Convert list[Decision] to the dict-keyed-by-id shape that the existing
-    render module expects during the Phase 2 transition. Phase 2.3 updates the
-    render module to take the list directly and this shim goes away."""
+    """Convert list[Decision] to the dict-keyed-by-id shape that render
+    consumes."""
     return {d.clip_id: asdict(d) for d in decisions}
