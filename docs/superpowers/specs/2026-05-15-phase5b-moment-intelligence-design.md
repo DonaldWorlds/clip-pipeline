@@ -62,7 +62,7 @@ RETURN re-ranked list.
 
 ## 4. Schema delta
 
-`Candidate` dataclass gains two optional fields (default empty; populated only by the re-ranker):
+`Candidate` dataclass gains three optional fields (default empty; populated only by the re-ranker):
 
 ```python
 @dataclass
@@ -70,9 +70,41 @@ class Candidate:
     # ... existing fields ...
     reference_fit_score: float = 0.0
     reference_ids_matched: list[str] = field(default_factory=list)
+    score_breakdown: dict = field(default_factory=dict)
 ```
 
-Re-ranker writes `graded_reranked.json` alongside `graded.json` in the work dir. Schema: same as `graded.json` plus the two new fields. Cache hit on rerun.
+### 4.1 `score_breakdown` — required observability
+
+Every re-ranked candidate carries an explicit breakdown of how its `final_score` was computed. Aggregate scores without breakdowns are debt: debugging, analytics, α tuning, client-explainability, and any future ML rankers all depend on the inputs being persisted, not recomputed.
+
+```python
+candidate.score_breakdown = {
+    # Raw component scores (0-1, higher = better match)
+    "transcript_cos":   0.82,
+    "payoff_cos":       0.77,
+    "density_match":    0.91,   # 1 - clamp(density_z / 3, 0, 1)
+    "duration_match":   0.65,   # 1 - clamp(duration_z / 3, 0, 1)
+
+    # The Pegasus side
+    "pegasus_score":    0.88,   # the candidate's original Stage-3 score
+
+    # The combined view
+    "fit_score":        0.79,   # weighted sum of the four match components
+    "final_score":      0.84,   # alpha-blended pegasus + fit
+    "alpha":            0.5,    # the blend weight used
+
+    # Diagnostic inputs (for tuning, not part of the score itself)
+    "candidate_wps":           3.4,
+    "median_ref_wps":          3.1,
+    "candidate_duration_s":    18.2,
+    "profile_typical_duration_s": 14.0,
+    "n_references_compared":   5,
+}
+```
+
+The `score_breakdown` dict is written verbatim into `graded_reranked.json` so it survives across runs and is trivially diffable. Field names are deliberately stable so a future dashboard / training-data extractor can join them across runs.
+
+Re-ranker writes `graded_reranked.json` alongside `graded.json` in the work dir. Schema: same as `graded.json` plus the three new fields. Cache hit on rerun.
 
 ## 5. Wiring
 
@@ -122,6 +154,7 @@ No change to `--client` / `--quickstart` semantics.
 4. **Re-rank is idempotent.** Re-running the same job with cached `graded_reranked.json` skips the embedding work.
 5. **The re-rank fingerprint extraction is cheap.** On a 10-minute source with 30 candidates, the re-rank step adds < 15 seconds to wall-clock (transcript embeddings batched in one sentence-transformers call).
 6. **Each kept candidate has `reference_ids_matched` populated** with the IDs of the top-5 retrieved refs.
+7. **Each kept candidate has a populated `score_breakdown` dict** with every field listed in §4.1 — verified by reading `graded_reranked.json` and confirming all keys present. Missing or empty `score_breakdown` is a hard failure.
 7. **A clear failure mode when refs are insufficient:** if the client has < 3 refs in the RAG db, `rerank` returns the input list unchanged and logs `[moment-intelligence] insufficient refs; skipping re-rank`. Does not crash.
 
 ## 8. Out of scope (explicit)
