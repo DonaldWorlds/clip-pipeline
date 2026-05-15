@@ -1,0 +1,12 @@
+{
+  "_comment": "Pass the video via --source on the command line (overrides source/source_type). top_n controls how many clips the detector returns. detection_backend=auto picks twelvelabs if TWELVELABS_API_KEY is set, else local (not yet implemented in v2).",
+
+  "source": "",
+  "source_type": "local",
+  "output_dir": "out/example",
+  "top_n": 3,
+  "detection_backend": "auto",
+  "llm_model": "llama3.1:8b",
+  "whisper_model": "small",
+  "variants": ["bloomberg", "tiktok_bro", "documentary"]
+}

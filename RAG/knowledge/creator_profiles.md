@@ -1,0 +1,5 @@
+- aggressive zooms
+- loud captions
+- high motion
+- rapid cuts
+- reaction-focused

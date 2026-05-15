@@ -1,0 +1,104 @@
+{
+  "bloomberg": {
+    "llm_persona": "Bloomberg terminal anchor. Precise, data-led, no slang. Reads like wire copy. Treat numbers and tickers as anchors. Hooks are flat declarative headlines. CTA is utilitarian (e.g., 'Track this open').",
+    "caption_mode": "lower_third",
+    "chyron_uppercase": true,
+    "subtitle_style": {
+      "font": "Helvetica",
+      "font_size": 44,
+      "primary_color": "&H00FFFFFF",
+      "secondary_color": "&H000000FF",
+      "outline_color": "&H00000000",
+      "back_color": "&HC0000000",
+      "highlight_color": "&H000089FF",
+      "bold": true,
+      "border_style": 4,
+      "outline_width": 0,
+      "shadow": 0,
+      "alignment": 2,
+      "margin_v": 90
+    },
+    "overlay_style": {
+      "hook_font": "Helvetica",
+      "hook_size": 56,
+      "hook_color": "white",
+      "hook_box": "black@0.65",
+      "chyron_font": "Helvetica",
+      "chyron_size": 40,
+      "chyron_color": "white",
+      "chyron_box": "#FF6A00@0.95",
+      "cta_font": "Helvetica",
+      "cta_size": 34,
+      "cta_color": "white",
+      "cta_box": "black@0.6"
+    }
+  },
+  "tiktok_bro": {
+    "llm_persona": "TikTok finance bro. High energy, plain English, light slang ('bag', 'cooked', 'mid'), zero jargon. Hooks are punchy — often a question or contrarian claim. CTA pushes follow/save. No emoji, no hashtags.",
+    "caption_mode": "karaoke_word",
+    "chyron_uppercase": true,
+    "subtitle_style": {
+      "font": "Impact",
+      "font_size": 96,
+      "primary_color": "&H0000FF00",
+      "secondary_color": "&H00FFFFFF",
+      "outline_color": "&H00000000",
+      "back_color": "&H00000000",
+      "highlight_color": "&H0000FF00",
+      "bold": true,
+      "border_style": 1,
+      "outline_width": 6,
+      "shadow": 2,
+      "alignment": 5,
+      "margin_v": 0
+    },
+    "overlay_style": {
+      "hook_font": "Impact",
+      "hook_size": 84,
+      "hook_color": "yellow",
+      "hook_box": "black@0.55",
+      "chyron_font": "Impact",
+      "chyron_size": 52,
+      "chyron_color": "white",
+      "chyron_box": "green@0.85",
+      "cta_font": "Impact",
+      "cta_size": 60,
+      "cta_color": "white",
+      "cta_box": "red@0.8"
+    }
+  },
+  "documentary": {
+    "llm_persona": "Sober documentary narrator. Measured, declarative, third-person voice. No hype, no slang. Hooks read like chapter titles from a Frontline episode. CTA is restrained (e.g., 'Read the full report').",
+    "caption_mode": "subtitles",
+    "chyron_uppercase": false,
+    "subtitle_style": {
+      "font": "Georgia",
+      "font_size": 40,
+      "primary_color": "&H00F0F0F0",
+      "secondary_color": "&H000000FF",
+      "outline_color": "&H00000000",
+      "back_color": "&H80000000",
+      "highlight_color": "&H00C0C0C0",
+      "bold": false,
+      "border_style": 1,
+      "outline_width": 2,
+      "shadow": 1,
+      "alignment": 2,
+      "margin_v": 80
+    },
+    "overlay_style": {
+      "hook_font": "Georgia",
+      "hook_size": 52,
+      "hook_color": "#F0F0F0",
+      "hook_box": "black@0.55",
+      "chyron_font": "Georgia",
+      "chyron_size": 36,
+      "chyron_color": "#F0F0F0",
+      "chyron_box": "#222222@0.85",
+      "cta_font": "Georgia",
+      "cta_size": 32,
+      "cta_color": "#E0E0E0",
+      "cta_box": "black@0.6"
+    }
+  }
+}

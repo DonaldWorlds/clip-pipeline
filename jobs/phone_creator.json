@@ -1,0 +1,12 @@
+{
+  "_comment": "Job template for phone-recorded creator content. Source is expected to be 9:16 vertical (phone in portrait). The pipeline auto-detects this and skips the streamer-overlay composite + ESRGAN/GFPGAN steps because the source is already a clean full-frame shot. Output is 9:16 only (matches source). Three style variants, each color-graded, ~1-2 min total render time per clip.",
+
+  "source": "",
+  "source_type": "local",
+  "output_dir": "out/phone_creator",
+  "top_n": 3,
+  "detection_backend": "auto",
+  "llm_model": "llama3.1:8b",
+  "whisper_model": "small",
+  "variants": ["bloomberg", "tiktok_bro", "documentary"]
+}
