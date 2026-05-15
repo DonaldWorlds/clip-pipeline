@@ -25,6 +25,7 @@ from clip_pipeline import source, thumbnail
 from clip_pipeline.analyze import detect, framing, whisper
 from clip_pipeline.editorial import copy as post_copy
 from clip_pipeline.editorial import decisions as editorial_decisions
+from clip_pipeline.rag import retrieve as rag_retrieve
 from clip_pipeline.render import pool as render
 from clip_pipeline.validate import editorial as editorial_validate
 from clip_pipeline.validate import technical as verify
@@ -56,6 +57,13 @@ def main():
     ap.add_argument("--top-n", type=int, help="Override job['top_n'].")
     ap.add_argument("--keep-temp", action="store_true",
                     help="Retain .work/ intermediates after success.")
+    ap.add_argument(
+        "--client",
+        help="(Phase 3) Client name. When set, the RAG Librarian retrieves "
+             "indexed reference clips for this client and grounds editorial "
+             "decisions in them. Falls back to global rulebook if client has "
+             "no references yet.",
+    )
     ap.add_argument(
         "--verify-before-render",
         action="store_true",
@@ -127,9 +135,39 @@ def main():
     # the streamer-overlay composite path entirely.
     framings = framing.analyze(job, src_path, selected, source_profile)
 
+    # 4.6. RAG retrieve (Phase 3) — if --client passed AND that client has
+    # indexed references, retrieve top-K per clip to ground decisions.
+    references_by_clip: dict[str, list] = {}
+    if args.client:
+        for c in selected:
+            # Query: the candidate's rationale (Pegasus "why it works") + its
+            # transcript snippet. retrieve.py will embed both client-side.
+            try:
+                refs = rag_retrieve.retrieve(
+                    client=args.client,
+                    niche=None,                  # niche-agnostic for now
+                    k=5,
+                    query_transcript=c.rationale or c.topic,
+                    query_description=c.rationale or c.topic,
+                )
+            except Exception as e:
+                print(f"[rag] retrieve failed for {c.id}: {e}", file=sys.stderr)
+                refs = []
+            if refs:
+                references_by_clip[c.id] = refs
+                print(f"[rag] {c.id}: retrieved {len(refs)} reference(s) for "
+                      f"client={args.client}", file=sys.stderr)
+        if not references_by_clip:
+            print(f"[rag] client={args.client} has no indexed references; "
+                  f"falling back to global rules only", file=sys.stderr)
+
     # 4.75. Editorial decisions: per-clip render parameter decisions, grounded
-    # in references/_global/style.md (loaded by editorial.rules).
-    decisions = editorial_decisions.decide_all(job, selected, framings)
+    # in references/_global/style.md (loaded by editorial.rules) and optionally
+    # in retrieved reference clips.
+    decisions = editorial_decisions.decide_all(
+        job, selected, framings,
+        references_by_clip=references_by_clip or None,
+    )
     recs = editorial_decisions.as_dict(decisions)
 
     # 5. Render every (clip × variant × aspect), parameterized by decisions.

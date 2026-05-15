@@ -232,8 +232,82 @@ def _twelvelabs_search(client, index_id: str, video_id: str) -> list[dict]:
     return moments
 
 
+PEGASUS_PICK_MOMENTS_PROMPT = """You are watching a long-form video. Identify the top 10 best moments to clip for short-form social posts.
+
+Judge by:
+- emotional peaks
+- quotable spoken lines
+- visual events (cuts, reveals, expressions)
+- narrative payoff (the moment a setup pays off)
+- surprise or strong contrast
+
+For each moment, return:
+  start_s: float — when the moment begins (seconds)
+  end_s:   float — when the moment ends   (seconds)
+  why_it_works: one short sentence explaining what makes it good
+  confidence:  float 0.0 to 1.0
+  suggested_clip_length_s: float — typical short-form length for this beat
+  dominant_signal: "verbal" | "visual" | "both"
+
+Return STRICT JSON only (no markdown, no commentary):
+{"moments": [{"start_s": 0.0, "end_s": 0.0, "why_it_works": "", "confidence": 0.0, "suggested_clip_length_s": 0.0, "dominant_signal": ""}]}
+""".strip()
+
+
+def _pegasus_pick_moments(client, video_id: str) -> list[dict]:
+    """Single Pegasus call replaces the 7-keyword search. Returns the raw
+    moment dicts (start, end, score, rationale). Returns [] on failure so the
+    caller can fall back to keyword search."""
+    import json
+    import re
+    try:
+        resp = client.analyze(
+            video_id=video_id,
+            model_name="pegasus1.2",
+            prompt=PEGASUS_PICK_MOMENTS_PROMPT,
+            temperature=0.3,
+        )
+    except Exception as e:
+        print(f"[pegasus.pick_moments] failed: {e}", file=sys.stderr)
+        return []
+    text = getattr(resp, "data", None) or getattr(resp, "text", None) or str(resp)
+    text = text.strip()
+    text = re.sub(r"^```(?:json)?\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        m = re.search(r"\{[\s\S]*\}", text)
+        if not m:
+            return []
+        try:
+            parsed = json.loads(m.group(0))
+        except json.JSONDecodeError:
+            return []
+    moments = parsed.get("moments", [])
+    out: list[dict] = []
+    for m in moments:
+        try:
+            start = float(m.get("start_s", 0))
+            end = float(m.get("end_s", 0))
+            conf = float(m.get("confidence", 0.5))
+        except (TypeError, ValueError):
+            continue
+        if end <= start:
+            continue
+        out.append({
+            "start": start,
+            "end": end,
+            "score": max(0.1, min(1.0, conf)),
+            "rationale": str(m.get("why_it_works", "pegasus pick")),
+        })
+    return out
+
+
 def detect_twelvelabs(job: Job, source_path: Path, words: list[Word]) -> list[Candidate]:
-    """Stage 3 — TwelveLabs backend. Returns ranked Candidates."""
+    """Stage 3 — TwelveLabs backend. Tries Pegasus.analyze first (one call,
+    semantic moment selection). Falls back to keyword-query search if Pegasus
+    fails or returns nothing."""
     cache = job.work_dir / "graded.json"
     if cache.exists():
         return [Candidate.from_dict(d) for d in cache_read(cache)]
@@ -241,9 +315,19 @@ def detect_twelvelabs(job: Job, source_path: Path, words: list[Word]) -> list[Ca
     client = _twelvelabs_client()
     index_id = _twelvelabs_get_index_id(client)
     video_id = _twelvelabs_upload(job, source_path)
-    raw_moments = _twelvelabs_search(client, index_id, video_id)
+
+    # Try Pegasus first
+    print(f"[detect] trying Pegasus.analyze for moment selection...", file=sys.stderr)
+    raw_moments = _pegasus_pick_moments(client, video_id)
+    pegasus_used = bool(raw_moments)
+    if pegasus_used:
+        print(f"[detect] Pegasus returned {len(raw_moments)} moments", file=sys.stderr)
+    else:
+        print(f"[detect] Pegasus path failed/empty — falling back to keyword search",
+              file=sys.stderr)
+        raw_moments = _twelvelabs_search(client, index_id, video_id)
     if not raw_moments:
-        sys.exit("TwelveLabs returned no moments for any query")
+        sys.exit("TwelveLabs returned no moments via either Pegasus or keyword search")
 
     # Diagnostic: surface the score distribution so a "0 candidates" bug is
     # immediately obvious in the log instead of silent.

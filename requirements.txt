@@ -5,3 +5,4 @@ opencv-python>=4.10
 twelvelabs>=0.3
 python-dotenv>=1.0
 realesrgan-ncnn-py>=2.0
+sentence-transformers>=2.7   # local CPU embeddings for the RAG Librarian
