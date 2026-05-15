@@ -1,4 +1,5 @@
 {
+  "_deprecated_notice": "DEPRECATED as of Phase 5a (2026-05-15). Hardcoded style variants are being replaced by per-client ClientStyleProfile derived from references/<client>/*.mp4. This file is read for backward compatibility only and will be removed in Phase 6. Do not add new variants here; ingest reference clips for the client instead.",
   "bloomberg": {
     "llm_persona": "Bloomberg terminal anchor. Precise, data-led, no slang. Reads like wire copy. Treat numbers and tickers as anchors. Hooks are flat declarative headlines. CTA is utilitarian (e.g., 'Track this open').",
     "caption_mode": "lower_third",

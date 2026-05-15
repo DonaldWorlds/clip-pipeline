@@ -98,10 +98,11 @@ def _decide_one(
         d.hero_aspect = "9:16" if sr_w <= sr_h else "16:9"
         d.crop_tightness = 0.9
         d.crf = 17
-        d.use_esrgan = True
-        d.esrgan_blend = 0.65
+        # ESRGAN auto-on by class removed (Phase 5a Batch A). Upscaling is
+        # now a per-client decision; Batch B will gate this on
+        # ClientStyleProfile.use_upscaling.
         d.preferred_variant = "tiktok_bro"
-        notes.append("class=overlay → ESRGAN x4plus blend 65%, tight crop to speaker_rect")
+        notes.append("class=overlay → tight crop to speaker_rect (no auto-ESRGAN)")
 
     elif framing.cls == "full_frame":
         sr_h = float(speaker_rect.get("h_frac", 0.0)) if speaker_rect else 0.0
@@ -125,10 +126,10 @@ def _decide_one(
         d.hero_aspect = "16:9"
         d.crop_tightness = 0.4
         d.crf = 18
-        d.use_esrgan = True
-        d.esrgan_blend = 0.55
+        # ESRGAN auto-on removed (Phase 5a Batch A). Gated on
+        # ClientStyleProfile.use_upscaling in Batch B.
         d.preferred_variant = "documentary"
-        notes.append("class=multi_subject → ESRGAN blend 55% (more natural for interviews)")
+        notes.append("class=multi_subject (no auto-ESRGAN)")
 
     else:  # no_subject
         d.hero_aspect = "16:9"

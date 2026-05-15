@@ -264,20 +264,9 @@ def _unsharp_filter(strength: float) -> str | None:
 
 
 def frame_styles_for(framing: Framing, aspect: str) -> list[str]:
-    """Decide which frame styles to render for a given (clip, aspect) pair.
-
-    - For overlay/multi_subject content the composite path produces an
-      inset-like look already; just one variant.
-    - For full_frame / mid_shot / no_subject content at 9:16 we offer BOTH
-      a 'full' (edge-to-edge) and an 'inset' (~88% centered + blurred
-      margins) — the two styles content creators routinely deliver to TikTok
-      and Reels.
-    - All other (clip, aspect) combinations get only 'full'.
-    """
-    if framing.cls in ("overlay", "multi_subject"):
-        return ["full"]
-    if aspect == "9:16":
-        return ["full", "inset"]
+    """Default to edge-to-edge for every (clip, aspect). Inset-blur is no
+    longer emitted unless a ClientStyleProfile sets frame_style=='inset'
+    (Phase 5a Batch B)."""
     return ["full"]
 
 

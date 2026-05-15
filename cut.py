@@ -65,6 +65,12 @@ def main():
              "no references yet.",
     )
     ap.add_argument(
+        "--with-thumbnail",
+        action="store_true",
+        help="(Phase 5a) Emit one JPG thumbnail per clip. Off by default — "
+             "short-form platforms (TikTok/Reels/Shorts) auto-pick frames.",
+    )
+    ap.add_argument(
         "--verify-before-render",
         action="store_true",
         help="(Phase 2) Vision sanity-check each clip's decision BEFORE rendering. "
@@ -175,11 +181,15 @@ def main():
                                  variants, recs)
     print(f"[cut] rendered {len(produced)} MP4s", file=sys.stderr)
 
-    # 5.5. Thumbnails — one JPG per clip. Pass framings so overlay-class clips
-    # get cropped to the speaker_rect (a thumbnail of the full screen recording
-    # is useless for streamer content).
-    thumbs = thumbnail.extract_all(job, src_path, selected, framings)
-    print(f"[cut] thumbnails: {len(thumbs)}", file=sys.stderr)
+    # 5.5. Thumbnails — opt-in. Short-form platforms auto-pick frames, so
+    # this is off by default. Flip with --with-thumbnail or via the
+    # ClientStyleProfile (Phase 5a Batch B) for the rare YouTube case.
+    if args.with_thumbnail:
+        thumbs = thumbnail.extract_all(job, src_path, selected, framings)
+        print(f"[cut] thumbnails: {len(thumbs)}", file=sys.stderr)
+    else:
+        print(f"[cut] thumbnails: skipped (use --with-thumbnail to enable)",
+              file=sys.stderr)
 
     # 5.7. Social post copy — TikTok / IG / YT captions + hashtags per clip.
     posts = post_copy.generate_all(job, selected)

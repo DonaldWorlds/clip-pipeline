@@ -178,7 +178,12 @@ def load_job(path: Path) -> Job:
 
 
 def load_variants(path: Path) -> dict:
-    return json.loads(path.read_text())
+    raw = json.loads(path.read_text())
+    notice = raw.pop("_deprecated_notice", None)
+    if notice:
+        import sys as _sys
+        print(f"[variants] DEPRECATION: {notice}", file=_sys.stderr)
+    return raw
 
 
 # ---------- JSON cache helpers ----------
