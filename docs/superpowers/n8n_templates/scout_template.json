@@ -1,0 +1,219 @@
+{
+  "name": "Scout Template — clip-pipeline reference ingestion",
+  "description": "Per-niche scout workflow. Scrapes trending short-form, filters by engagement, downloads top N, drops them into references/inbox/<client>/, optionally triggers Python ingest. Copy this workflow once per client niche and edit: hashtags, filter rules, client/niche names, and the absolute paths.",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 6 * * *"
+            }
+          ]
+        }
+      },
+      "id": "schedule-trigger",
+      "name": "Daily 6am",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "_comment": "Replace this with an Apify call OR a yt-dlp Execute Command. Apify TikTok Scraper: POST https://api.apify.com/v2/acts/clockworks~tiktok-scraper/run-sync-get-dataset-items?token=<APIFY_TOKEN>. Body: {hashtags: ['fitness'], resultsPerPage: 50}. For yt-dlp: see the SetVariables note above.",
+        "method": "POST",
+        "url": "https://api.apify.com/v2/acts/clockworks~tiktok-scraper/run-sync-get-dataset-items?token=REPLACE_APIFY_TOKEN",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"hashtags\": [\"fitness\", \"gymtok\", \"workout\"],\n  \"resultsPerPage\": 50\n}",
+        "options": {}
+      },
+      "id": "scrape-trending",
+      "name": "Scrape Trending",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "_comment": "Filter to keep only posts worth ingesting. Tune the thresholds per niche. Default: 50k views, 6% like rate, duration 8-30s.",
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "min-views",
+              "leftValue": "={{ $json.views }}",
+              "rightValue": 50000,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            },
+            {
+              "id": "like-rate",
+              "leftValue": "={{ $json.likes / $json.views }}",
+              "rightValue": 0.06,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            },
+            {
+              "id": "duration-max",
+              "leftValue": "={{ $json.duration }}",
+              "rightValue": 30,
+              "operator": {
+                "type": "number",
+                "operation": "lte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "engagement-filter",
+      "name": "Engagement Filter",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "_comment": "Score = views*1 + likes*5 + saves*30 + shares*50. Saves and shares are MUCH stronger signals than likes — weight accordingly.",
+        "jsCode": "const scored = items.map(item => ({\n  ...item,\n  json: {\n    ...item.json,\n    engagement_score:\n      (item.json.views || 0) * 1 +\n      (item.json.likes || 0) * 5 +\n      (item.json.saves || 0) * 30 +\n      (item.json.shares || 0) * 50\n  }\n}));\nscored.sort((a, b) => b.json.engagement_score - a.json.engagement_score);\nreturn scored.slice(0, 10);"
+      },
+      "id": "score-and-limit",
+      "name": "Score + Top 10",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "split-batches",
+      "name": "One at a Time",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "_comment": "Download the actual video bytes from the scraped URL.",
+        "method": "GET",
+        "url": "={{ $json.videoUrl || $json.video_url }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      },
+      "id": "download-video",
+      "name": "Download Video",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1340, 240]
+    },
+    {
+      "parameters": {
+        "_comment": "Write the MP4. PATH MUST BE ABSOLUTE. Edit /Users/donaldk/Desktop/clip-pipeline/references/inbox/<client>/ for your machine and client name.",
+        "operation": "write",
+        "fileName": "=/Users/donaldk/Desktop/clip-pipeline/references/inbox/fitness_creator_v1/{{ $json.id }}.mp4",
+        "options": {}
+      },
+      "id": "write-mp4",
+      "name": "Write MP4 to inbox",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [1560, 240]
+    },
+    {
+      "parameters": {
+        "_comment": "Write the sidecar JSON with engagement metadata. The Python ingest reads this for niche + engagement stats.",
+        "operation": "write",
+        "fileName": "=/Users/donaldk/Desktop/clip-pipeline/references/inbox/fitness_creator_v1/{{ $json.id }}.json",
+        "dataPropertyName": "sidecar",
+        "options": {}
+      },
+      "id": "write-sidecar",
+      "name": "Write Sidecar JSON",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [1780, 240]
+    },
+    {
+      "parameters": {
+        "_comment": "Build the sidecar JSON. Niche + client should match the folder name above. Adjust field names if your scraper returns different keys.",
+        "assignments": {
+          "assignments": [
+            {
+              "id": "sidecar",
+              "name": "sidecar",
+              "type": "object",
+              "value": "={\n  \"niche\": \"fitness_creator\",\n  \"source_url\": $json.url || $json.webVideoUrl,\n  \"client\": \"fitness_creator_v1\",\n  \"views\": $json.views,\n  \"likes\": $json.likes,\n  \"saves\": $json.saves,\n  \"shares\": $json.shares,\n  \"posted_at\": $json.created\n}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "build-sidecar",
+      "name": "Build Sidecar",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1340, 360]
+    },
+    {
+      "parameters": {
+        "_comment": "OPTIONAL: Trigger Python ingest immediately after dropping all files. Comment out the node if you'd rather run ingest manually. Path to python and the project must be absolute.",
+        "command": "/Users/donaldk/Desktop/clip-pipeline/.venv/bin/python -m clip_pipeline.rag.ingest fitness_creator_v1"
+      },
+      "id": "trigger-ingest",
+      "name": "Trigger Python Ingest",
+      "type": "n8n-nodes-base.executeCommand",
+      "typeVersion": 1,
+      "position": [2000, 300]
+    }
+  ],
+  "connections": {
+    "Daily 6am": {
+      "main": [[{"node": "Scrape Trending", "type": "main", "index": 0}]]
+    },
+    "Scrape Trending": {
+      "main": [[{"node": "Engagement Filter", "type": "main", "index": 0}]]
+    },
+    "Engagement Filter": {
+      "main": [[{"node": "Score + Top 10", "type": "main", "index": 0}]]
+    },
+    "Score + Top 10": {
+      "main": [[{"node": "One at a Time", "type": "main", "index": 0}]]
+    },
+    "One at a Time": {
+      "main": [[
+        {"node": "Download Video", "type": "main", "index": 0},
+        {"node": "Build Sidecar", "type": "main", "index": 0}
+      ]]
+    },
+    "Download Video": {
+      "main": [[{"node": "Write MP4 to inbox", "type": "main", "index": 0}]]
+    },
+    "Write MP4 to inbox": {
+      "main": [[{"node": "Write Sidecar JSON", "type": "main", "index": 0}]]
+    },
+    "Build Sidecar": {
+      "main": [[{"node": "Write Sidecar JSON", "type": "main", "index": 0}]]
+    },
+    "Write Sidecar JSON": {
+      "main": [[{"node": "Trigger Python Ingest", "type": "main", "index": 0}]]
+    }
+  }
+}
