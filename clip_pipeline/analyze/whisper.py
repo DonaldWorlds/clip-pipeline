@@ -4,7 +4,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from .config import Job, Word, cache_read, cache_write
+from ..config import Job, Word, cache_read, cache_write
 
 
 def transcribe(job: Job, source_path: Path) -> list[Word]:

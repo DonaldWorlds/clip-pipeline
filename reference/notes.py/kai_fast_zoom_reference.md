@@ -1,5 +1,0 @@
-- zoom every 1-2 seconds
-- captions centered
-- hard cuts
-- loud emotional pacing
-- hook immediately

@@ -20,7 +20,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .config import Candidate, Word, cache_read, cache_write
+from ..config import Candidate, Word, cache_read, cache_write
 
 
 FILLER_WORDS = {"um", "uh", "ah", "er", "umm", "uhh", "hmm", "uhm"}

@@ -21,8 +21,8 @@ import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
-from .caption import build_ass
-from .config import (
+from ..caption import build_ass
+from ..config import (
     ASPECT_RES,
     Candidate,
     Framing,
@@ -30,10 +30,10 @@ from .config import (
     Word,
     aspect_slug,
 )
+from ..analyze.whisper import words_in_range
 from .enhance import enhance_speaker_region
 from .grade import filter_for as grade_filter_for
 from .trim import prepare_trimmed_clip
-from .whisper import words_in_range
 
 
 import os

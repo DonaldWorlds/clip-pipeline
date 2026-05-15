@@ -17,7 +17,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from .config import Candidate, Framing, Job, cache_read, cache_write
+from ..config import Candidate, Framing, Job, cache_read, cache_write
 
 
 # ---------- thresholds ----------

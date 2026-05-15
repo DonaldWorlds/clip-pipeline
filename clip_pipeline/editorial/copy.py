@@ -22,7 +22,7 @@ import re
 import sys
 from pathlib import Path
 
-from .config import Candidate, Job, cache_read, cache_write
+from ..config import Candidate, Job, cache_read, cache_write
 
 
 PROMPT = (

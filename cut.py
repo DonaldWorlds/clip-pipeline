@@ -21,17 +21,11 @@ import sys
 from pathlib import Path
 
 from clip_pipeline import config as cfg
-from clip_pipeline import (
-    copy as post_copy,
-    detect,
-    framing,
-    intelligence,
-    render,
-    source,
-    thumbnail,
-    verify,
-    whisper,
-)
+from clip_pipeline import intelligence, source, thumbnail
+from clip_pipeline.analyze import detect, framing, whisper
+from clip_pipeline.editorial import copy as post_copy
+from clip_pipeline.render import pool as render
+from clip_pipeline.validate import technical as verify
 
 
 def _select_top_n(cands, n: int):

@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .config import Job, cache_write
+from ..config import Job, cache_write
 
 
 STILL_FRAME_DIFF_THRESHOLD = 0.5

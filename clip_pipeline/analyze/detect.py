@@ -14,7 +14,7 @@ import sys
 import time
 from pathlib import Path
 
-from .config import Candidate, Job, Word, cache_read, cache_write
+from ..config import Candidate, Job, Word, cache_read, cache_write
 
 
 # ---------- shared: sentence-boundary refinement ----------
