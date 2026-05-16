@@ -190,7 +190,12 @@ def decide_all(
     cache = job.work_dir / "decisions.json"
     if cache.exists():
         raw = cache_read(cache)
-        return [Decision(**d) for d in raw]
+        # Filter unknown keys so a cache written by an older schema (e.g.
+        # pre-Phase 5a Decision had hero_aspect / preferred_variant fields
+        # that no longer exist) doesn't crash this load.
+        import dataclasses as _dc
+        known = {f.name for f in _dc.fields(Decision)}
+        return [Decision(**{k: v for k, v in d.items() if k in known}) for d in raw]
 
     rules = rules_mod.load()
     framing_by_id = {f.id: f for f in framings}
