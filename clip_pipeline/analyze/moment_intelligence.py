@@ -41,6 +41,16 @@ DENSITY_Z_CLAMP = 3.0          # words-per-second z-score saturation
 DURATION_Z_CLAMP = 3.0
 CACHE_FILENAME = "graded_reranked.json"
 
+# Scoring weights. Picked at runtime based on whether the client's refs have
+# real Pegasus descriptions or degenerate empty-text ones (Marengo-only TL
+# index — see memory: project_twelvelabs_marengo_only).
+#                          transcript, payoff, density, duration
+WEIGHTS_PEGASUS  = (0.40, 0.40, 0.10, 0.10)
+WEIGHTS_MARENGO  = (0.80, 0.00, 0.10, 0.10)
+# Refs are considered "Pegasus-real" when at least this fraction have any
+# non-whitespace Pegasus description text.
+PEGASUS_DETECTION_THRESHOLD = 0.5
+
 
 # ---------- snippet building + embedding ----------
 
@@ -162,12 +172,23 @@ def rerank(
     ]
 
     # Reference-side: gather transcript embeddings, payoff-description
-    # embeddings, and words-per-second from the ingested fingerprints.
-    ref_t_embs, ref_d_embs, ref_wps = _load_reference_embeddings(client, refs)
+    # embeddings, words-per-second, and whether Pegasus descriptions are
+    # real (vs Marengo-only degenerate blanks) from the ingested fingerprints.
+    ref_t_embs, ref_d_embs, ref_wps, has_pegasus = _load_reference_embeddings(client, refs)
     if ref_t_embs is None or len(ref_t_embs) < MIN_REFS_FOR_RERANK:
         print(f"[moment-intelligence] ref embeddings unavailable; skipping",
               file=sys.stderr)
         return candidates
+
+    # Pick weights based on Pegasus availability. Marengo-only mode collapses
+    # payoff_cos's 0.40 weight into transcript_cos so the scoring math stays
+    # meaningful instead of carrying a dead 40% slot.
+    weights = WEIGHTS_PEGASUS if has_pegasus else WEIGHTS_MARENGO
+    w_transcript, w_payoff, w_density, w_duration = weights
+    mode = "pegasus" if has_pegasus else "marengo"
+    print(f"[moment-intelligence] scoring mode={mode} "
+          f"(weights: transcript={w_transcript} payoff={w_payoff} "
+          f"density={w_density} duration={w_duration})", file=sys.stderr)
 
     # Top-K retrieve per candidate so the per-candidate comparison is against
     # the MOST SIMILAR refs, not the whole pool. Falls back to whole pool if
@@ -198,10 +219,10 @@ def rerank(
         payoff_cos_n     = max(0.0, min(1.0, (payoff_cos + 1.0) / 2.0))
 
         fit_score = (
-            0.40 * transcript_cos_n
-            + 0.40 * payoff_cos_n
-            + 0.10 * density_match
-            + 0.10 * duration_match
+            w_transcript * transcript_cos_n
+            + w_payoff * payoff_cos_n
+            + w_density * density_match
+            + w_duration * duration_match
         )
 
         pegasus_score = float(c.score)
@@ -218,6 +239,14 @@ def rerank(
             "fit_score":        round(fit_score, 4),
             "final_score":      round(final_score, 4),
             "alpha":            alpha,
+            # Which weight regime ran. Lets analytics & future ML know
+            # the payoff_cos column is signal (pegasus mode) vs noise
+            # (marengo mode), and lets us compare runs across regimes.
+            "scoring_mode":     mode,
+            "weights":          {
+                "transcript": w_transcript, "payoff": w_payoff,
+                "density":    w_density,    "duration": w_duration,
+            },
             "candidate_wps":    round(cand_wps_list[i], 2),
             "median_ref_wps":   round(median_ref_wps, 2),
             "candidate_duration_s":      round(cand_durations[i], 2),
@@ -260,29 +289,33 @@ def _cache_key(client: str, candidates: list[Candidate], alpha: float) -> str:
 
 def _load_reference_embeddings(
     client: str, refs: list[dict],
-) -> tuple[np.ndarray | None, np.ndarray | None, list[float]]:
+) -> tuple[np.ndarray | None, np.ndarray | None, list[float], bool]:
     """Pull each reference's transcript + description embedding from rag.db
-    (they were computed at ingest time). Also compute each ref's words-per-
-    second from its stored transcript + duration.
+    (computed at ingest time). Also compute each ref's words-per-second from
+    its stored transcript + duration. Detect whether the client's refs
+    actually have Pegasus describes or are degenerate (TL Marengo-only
+    index — Pegasus generate-API failed at ingest, descriptions are blank).
 
-    Returns (transcript_embs, description_embs, wps_list). Embeddings are
-    (N, D) numpy arrays. Returns (None, None, []) if anything fails badly."""
+    Returns (transcript_embs, description_embs, wps_list, has_pegasus).
+    Embeddings are (N, D) arrays. Returns (None, None, [], False) on hard
+    failure."""
     import sqlite3
     from ..rag.retrieve import DB_PATH
 
     if not DB_PATH.exists():
-        return None, None, []
+        return None, None, [], False
 
     ids = [r.get("id") for r in refs]
     if not ids:
-        return None, None, []
+        return None, None, [], False
 
     placeholders = ",".join("?" * len(ids))
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     cur = conn.execute(
         f"SELECT id, transcript, duration_s, transcript_embedding, "
-        f"description_embedding FROM reference_clips "
+        f"description_embedding, pegasus_hook, pegasus_pacing, "
+        f"pegasus_captions, pegasus_payoff FROM reference_clips "
         f"WHERE id IN ({placeholders})",
         ids,
     )
@@ -291,22 +324,32 @@ def _load_reference_embeddings(
 
     by_id = {r["id"]: r for r in rows}
     t_embs, d_embs, wps_list = [], [], []
+    pegasus_real_count = 0
     for ref_id in ids:
         row = by_id.get(ref_id)
         if not row:
-            return None, None, []
+            return None, None, [], False
         t_blob = row["transcript_embedding"]
         d_blob = row["description_embedding"]
         if not t_blob or not d_blob:
-            return None, None, []
+            return None, None, [], False
         t_embs.append(np.frombuffer(t_blob, dtype="float32"))
         d_embs.append(np.frombuffer(d_blob, dtype="float32"))
         transcript = row["transcript"] or ""
         dur = float(row["duration_s"] or 0.0)
         wps = (len(transcript.split()) / dur) if dur > 0 else 0.0
         wps_list.append(wps)
+        pegasus_text = " ".join([
+            row["pegasus_hook"] or "",
+            row["pegasus_pacing"] or "",
+            row["pegasus_captions"] or "",
+            row["pegasus_payoff"] or "",
+        ]).strip()
+        if pegasus_text:
+            pegasus_real_count += 1
 
-    return np.stack(t_embs), np.stack(d_embs), wps_list
+    has_pegasus = pegasus_real_count / len(ids) >= PEGASUS_DETECTION_THRESHOLD
+    return np.stack(t_embs), np.stack(d_embs), wps_list, has_pegasus
 
 
 def _top_k_per_candidate(
