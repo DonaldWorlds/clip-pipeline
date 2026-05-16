@@ -150,6 +150,7 @@ def ingest_one(
     mp4_path: Path,
     sidecar_path: Path,
     client: str,
+    skip_twelvelabs: bool = False,
 ) -> bool:
     """Ingest a single reference clip. Returns True on success."""
     if not mp4_path.exists() or not sidecar_path.exists():
@@ -173,9 +174,15 @@ def ingest_one(
         conn.close()
         return True
 
-    # TwelveLabs upload (for Pegasus description)
-    print(f"[ingest] {clip_id}: uploading to TwelveLabs...", file=sys.stderr)
-    twelvelabs_video_id = _twelvelabs_upload(mp4_path)
+    # TwelveLabs upload (for Pegasus description). Skipped entirely when
+    # `--no-pegasus` is passed — saves 30-60s per clip when the account
+    # doesn't have a Pegasus-enabled index. The fingerprinter handles
+    # video_id=None gracefully (blank PegasusDescription).
+    if skip_twelvelabs:
+        twelvelabs_video_id = None
+    else:
+        print(f"[ingest] {clip_id}: uploading to TwelveLabs...", file=sys.stderr)
+        twelvelabs_video_id = _twelvelabs_upload(mp4_path)
 
     # Fingerprint
     print(f"[ingest] {clip_id}: fingerprinting...", file=sys.stderr)
@@ -241,7 +248,7 @@ def ingest_one(
 
 # ---------- inbox driver ----------
 
-def ingest_inbox(client: str) -> int:
+def ingest_inbox(client: str, skip_twelvelabs: bool = False) -> int:
     """Walk references/inbox/<client>/, ingest every .mp4 with a matching
     sidecar .json. Returns the count successfully ingested."""
     inbox = REFERENCES_INBOX / client
@@ -260,7 +267,7 @@ def ingest_inbox(client: str) -> int:
         if not sidecar.exists():
             print(f"[ingest] {mp4.name}: no sidecar, skipping", file=sys.stderr)
             continue
-        if ingest_one(mp4, sidecar, client):
+        if ingest_one(mp4, sidecar, client, skip_twelvelabs=skip_twelvelabs):
             n += 1
     print(f"[ingest] {client}: ingested {n} new reference(s)", file=sys.stderr)
 
@@ -281,6 +288,16 @@ def ingest_inbox(client: str) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("client", help="Client name (folder under references/inbox/)")
+    ap.add_argument(
+        "--no-pegasus",
+        action="store_true",
+        help="Skip TwelveLabs upload entirely. Use when your TL account "
+             "doesn't have a Pegasus-enabled index — saves 30-60s per clip. "
+             "Fingerprinting still runs locally (transcript + visual + "
+             "editorial signatures + transcript embeddings). Pegasus "
+             "description fields are left blank; moment-intelligence "
+             "automatically picks the Marengo-mode scoring weights.",
+    )
     args = ap.parse_args()
 
     # Load .env so TWELVELABS_API_KEY is available
@@ -290,7 +307,7 @@ def main() -> int:
     except Exception:
         pass
 
-    n = ingest_inbox(args.client)
+    n = ingest_inbox(args.client, skip_twelvelabs=args.no_pegasus)
     return 0 if n >= 0 else 1
 
 
