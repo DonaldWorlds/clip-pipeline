@@ -28,17 +28,18 @@ def build_grade_filter(grade: ColorGrade) -> str | None:
         eq_terms.append(f"contrast={grade.contrast_target:.2f}")
     if abs(grade.saturation_target - 1.0) > 0.01:
         eq_terms.append(f"saturation={grade.saturation_target:.2f}")
-    # Brightness shift: ffmpeg eq=brightness is -1.0..+1.0, neutral 0.
-    # The naive math `(target - 128) / 128` assumes the source starts at
-    # neutral (128). Real sources rarely do — applying a -0.34 shift to a
-    # normally-lit YouTube video crushes it. Cap the shift to ±0.10 so the
-    # color grade can nudge toward the reference look without crushing the
-    # source. For deeper target-matching we'd need to measure the source
-    # brightness first (future work).
-    raw_delta = (grade.brightness_target - 128.0) / 128.0
-    delta = max(-0.10, min(0.10, raw_delta))
-    if abs(delta) > 0.02:
-        eq_terms.append(f"brightness={delta:.2f}")
+    # Brightness shift DISABLED. The naive math `(target - 128) / 128` was
+    # broken: it assumes the source starts at neutral (128) and shifts toward
+    # the target. Real sources don't start at 128. On a Creators.mp4 source
+    # measured at brightness ~51 (already dim), the shift was subtracting
+    # another 25-87 points and crushing the image to near-black. Even the
+    # ±0.10 cap was still making things WORSE because the math always
+    # subtracts when the target is below 128.
+    #
+    # Proper fix requires source-brightness measurement at render time, then
+    # computing delta = (target - source_mean) / 256. That's future work.
+    # For now: leave brightness alone. Contrast/saturation/color_temp below
+    # still apply for styling without the brightness bug.
     if eq_terms:
         parts.append("eq=" + ":".join(eq_terms))
 
