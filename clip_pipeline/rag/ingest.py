@@ -150,7 +150,7 @@ def ingest_one(
     mp4_path: Path,
     sidecar_path: Path,
     client: str,
-    skip_twelvelabs: bool = False,
+    skip_pegasus: bool = False,
 ) -> bool:
     """Ingest a single reference clip. Returns True on success."""
     if not mp4_path.exists() or not sidecar_path.exists():
@@ -174,15 +174,17 @@ def ingest_one(
         conn.close()
         return True
 
-    # TwelveLabs upload (for Pegasus description). Skipped entirely when
-    # `--no-pegasus` is passed — saves 30-60s per clip when the account
-    # doesn't have a Pegasus-enabled index. The fingerprinter handles
-    # video_id=None gracefully (blank PegasusDescription).
-    if skip_twelvelabs:
-        twelvelabs_video_id = None
-    else:
-        print(f"[ingest] {clip_id}: uploading to TwelveLabs...", file=sys.stderr)
-        twelvelabs_video_id = _twelvelabs_upload(mp4_path)
+    # TwelveLabs upload — ALWAYS runs when API key is set. The videos need
+    # to land in TL so they're Marengo-indexed (cut.py uses Marengo search at
+    # detect time). The Pegasus describe call is what's optional: with
+    # --no-pegasus we still upload, we just don't pass the video_id to the
+    # fingerprinter, which means _pegasus_description is never called.
+    print(f"[ingest] {clip_id}: uploading to TwelveLabs...", file=sys.stderr)
+    uploaded_video_id = _twelvelabs_upload(mp4_path)
+    # If skip_pegasus, still upload (above) but don't trigger the Pegasus
+    # describe call downstream. PegasusDescription will be blank — same end
+    # state as a failed Pegasus call, no error noise.
+    twelvelabs_video_id = None if skip_pegasus else uploaded_video_id
 
     # Fingerprint
     print(f"[ingest] {clip_id}: fingerprinting...", file=sys.stderr)
@@ -248,7 +250,7 @@ def ingest_one(
 
 # ---------- inbox driver ----------
 
-def ingest_inbox(client: str, skip_twelvelabs: bool = False) -> int:
+def ingest_inbox(client: str, skip_pegasus: bool = False) -> int:
     """Walk references/inbox/<client>/, ingest every .mp4 with a matching
     sidecar .json. Returns the count successfully ingested."""
     inbox = REFERENCES_INBOX / client
@@ -267,7 +269,7 @@ def ingest_inbox(client: str, skip_twelvelabs: bool = False) -> int:
         if not sidecar.exists():
             print(f"[ingest] {mp4.name}: no sidecar, skipping", file=sys.stderr)
             continue
-        if ingest_one(mp4, sidecar, client, skip_twelvelabs=skip_twelvelabs):
+        if ingest_one(mp4, sidecar, client, skip_pegasus=skip_pegasus):
             n += 1
     print(f"[ingest] {client}: ingested {n} new reference(s)", file=sys.stderr)
 
@@ -291,12 +293,12 @@ def main() -> int:
     ap.add_argument(
         "--no-pegasus",
         action="store_true",
-        help="Skip TwelveLabs upload entirely. Use when your TL account "
-             "doesn't have a Pegasus-enabled index — saves 30-60s per clip. "
-             "Fingerprinting still runs locally (transcript + visual + "
-             "editorial signatures + transcript embeddings). Pegasus "
-             "description fields are left blank; moment-intelligence "
-             "automatically picks the Marengo-mode scoring weights.",
+        help="Upload to TwelveLabs (so videos are Marengo-indexed for "
+             "cut.py-time search) but skip the Pegasus describe call. Use "
+             "when your TL account has only Marengo-supporting indexes — "
+             "avoids the 400/404 error noise. Pegasus description fields "
+             "are left blank; moment-intelligence auto-picks the "
+             "Marengo-mode scoring weights.",
     )
     args = ap.parse_args()
 
@@ -307,7 +309,7 @@ def main() -> int:
     except Exception:
         pass
 
-    n = ingest_inbox(args.client, skip_twelvelabs=args.no_pegasus)
+    n = ingest_inbox(args.client, skip_pegasus=args.no_pegasus)
     return 0 if n >= 0 else 1
 
 
