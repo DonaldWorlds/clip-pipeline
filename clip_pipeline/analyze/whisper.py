@@ -21,7 +21,7 @@ def transcribe(job: Job, source_path: Path) -> list[Word]:
     segments, _ = model.transcribe(
         str(source_path),
         word_timestamps=True,
-        vad_filter=True,
+        vad_filter=False,
         condition_on_previous_text=False,
         beam_size=5,
     )
