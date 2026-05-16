@@ -60,24 +60,20 @@ def _file_hash(p: Path) -> str:
 
 def _twelvelabs_upload(video_path: Path) -> str | None:
     """Returns a TwelveLabs video_id for the file, or None if upload fails.
-    Uses a per-machine cache file so we never re-upload the same file."""
+
+    Per-machine cache file maps file_hash -> video_id so we never re-upload
+    the same content. Cache is INDEX-AWARE: the cache file embeds the index_id
+    it was populated against; if the current account's first index_id no
+    longer matches (user deleted + recreated the index), the cache is
+    invalidated wholesale on next ingest. This prevents Pegasus 404s from
+    cached video_ids pointing at a deleted index.
+    """
     if not os.environ.get("TWELVELABS_API_KEY"):
         print("[ingest] TWELVELABS_API_KEY not set; skipping Pegasus description",
               file=sys.stderr)
         return None
 
-    cache_path = DATA_DIR / "twelvelabs_references.json"
-    cache: dict[str, str] = {}
-    if cache_path.exists():
-        try:
-            cache = json.loads(cache_path.read_text())
-        except Exception:
-            cache = {}
-
-    h = _file_hash(video_path)
-    if h in cache:
-        return cache[h]
-
+    # Resolve current index up front so we can validate cache against it.
     try:
         from twelvelabs import TwelveLabs
         client = TwelveLabs(api_key=os.environ["TWELVELABS_API_KEY"])
@@ -86,6 +82,35 @@ def _twelvelabs_upload(video_path: Path) -> str | None:
             print("[ingest] no TwelveLabs index found", file=sys.stderr)
             return None
         index_id = indexes[0].id
+    except Exception as e:
+        print(f"[ingest] TwelveLabs index lookup failed: {e}", file=sys.stderr)
+        return None
+
+    cache_path = DATA_DIR / "twelvelabs_references.json"
+    cache: dict = {}
+    if cache_path.exists():
+        try:
+            cache = json.loads(cache_path.read_text())
+        except Exception:
+            cache = {}
+
+    # Index-aware invalidation: if the cache was populated against a
+    # different index_id, throw it out. Deleting + recreating the index
+    # on the dashboard implicitly resets the cache here.
+    cached_index = cache.get("_index_id")
+    if cached_index != index_id:
+        if cache:
+            print(f"[ingest] TwelveLabs index changed "
+                  f"(cached={cached_index!r}, now={index_id!r}); "
+                  f"invalidating {len(cache) - 1} cached video_id(s)",
+                  file=sys.stderr)
+        cache = {"_index_id": index_id}
+
+    h = _file_hash(video_path)
+    if h in cache and h != "_index_id":
+        return cache[h]
+
+    try:
         with open(video_path, "rb") as f:
             task = client.tasks.create(index_id=index_id, video_file=f)
         task_id = getattr(task, "id", None) or getattr(task, "_id", None)

@@ -256,10 +256,10 @@ def derive_from_references(client: str) -> ClientStyleProfile | None:
     visuals = [f.get("visual", {}) for f in fps if f.get("visual")]
     if visuals:
         from collections import Counter
-        brightness = median([float(v.get("avg_brightness", 128.0)) for v in visuals])
+        brightness_vals = [float(v.get("avg_brightness", 128.0)) for v in visuals]
+        brightness = median(brightness_vals) if brightness_vals else floor.color_grade.brightness_target
         temps = [v.get("color_temp", "neutral") for v in visuals]
-        # Counter.most_common is deterministic on ties (insertion order)
-        temp = Counter(temps).most_common(1)[0][0]
+        temp = Counter(temps).most_common(1)[0][0] if temps else floor.color_grade.color_temp
     else:
         brightness = floor.color_grade.brightness_target
         temp = floor.color_grade.color_temp
@@ -267,10 +267,17 @@ def derive_from_references(client: str) -> ClientStyleProfile | None:
     editorials = [f.get("editorial", {}) for f in fps if f.get("editorial")]
     if editorials:
         y_fracs = [float(e.get("caption_y_frac", floor.caption.y_frac)) for e in editorials]
-        font_pxs = [int(e.get("caption_font_px") or 0) for e in editorials]
-        y_frac = round(median(y_fracs), 3)
-        font_px = max(floor.caption.font_px_at_1080,
-                      int(median([p for p in font_pxs if p > 0]) or floor.caption.font_px_at_1080))
+        font_pxs_nonzero = [int(e.get("caption_font_px") or 0) for e in editorials]
+        font_pxs_nonzero = [p for p in font_pxs_nonzero if p > 0]
+        y_frac = round(median(y_fracs), 3) if y_fracs else floor.caption.y_frac
+        # font_pxs_nonzero is usually empty because the fingerprinter doesn't
+        # OCR raw refs (caption_font_px is hardcoded to 0). Fall through to
+        # the floor in that case — never call median([]).
+        font_px_from_refs = (
+            int(median(font_pxs_nonzero)) if font_pxs_nonzero
+            else floor.caption.font_px_at_1080
+        )
+        font_px = max(floor.caption.font_px_at_1080, font_px_from_refs)
     else:
         y_frac = floor.caption.y_frac
         font_px = floor.caption.font_px_at_1080
