@@ -182,7 +182,13 @@ def _composite_overlay_filter(
     return ";".join([fg, bg, composite])
 
 
-def _zoompan_filter(framing: Framing, fps: float, duration: float) -> str:
+def _zoompan_filter(framing: Framing, fps: float, duration: float,
+                    src_w: int, src_h: int) -> str:
+    """zoompan filter. The s= option requires a literal image size — passing
+    `iw`/`ih` expressions there doesn't work (ffmpeg parses it as a literal
+    string and fails). We pass the actual source dimensions explicitly so
+    the zoompan output preserves the source resolution; downstream crop/scale
+    handles the aspect conversion."""
     cx = framing.zoom["center_x"]
     cy = framing.zoom["center_y"]
     z_start = framing.zoom["start"]
@@ -194,7 +200,7 @@ def _zoompan_filter(framing: Framing, fps: float, duration: float) -> str:
     return (
         f"zoompan=z='{z_expr}'"
         f":x='{x_expr}':y='{y_expr}'"
-        f":d=1:fps={fps}:s=iw0xih0"
+        f":d=1:fps={fps}:s={src_w}x{src_h}"
     )
 
 
@@ -318,14 +324,15 @@ def _render_one(
         enhanced_path = job.work_dir / f"{cand.id}.enhanced.mp4"
         use_enhanced_source = want_esrgan and enhanced_path.exists()
 
+        visual_input = enhanced_path if use_enhanced_source else clip_path
+        src_w, src_h = _probe_source_dims(visual_input)
+
         filters = []
         if framing.zoom.get("enabled"):
             fps = _probe_fps(clip_path)
             duration = cand.end - cand.start
-            filters.append(_zoompan_filter(framing, fps, duration))
+            filters.append(_zoompan_filter(framing, fps, duration, src_w, src_h))
 
-        visual_input = enhanced_path if use_enhanced_source else clip_path
-        src_w, src_h = _probe_source_dims(visual_input)
         filters.append(_simple_aspect_filter(
             aspect, crop_tightness=crop_tightness,
             speaker_rect=speaker_rect, src_w=src_w, src_h=src_h,
