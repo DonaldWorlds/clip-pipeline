@@ -336,11 +336,31 @@ def _apply_source_profile(f: Framing, source_profile: str) -> Framing:
 
 def analyze(job: Job, source: Path, selected: list[Candidate],
             source_profile: str = "unknown") -> list[Framing]:
-    """Stage 4.5: produce framing.json. Cached per job."""
+    """Stage 4.5: produce framing.json. Cached per job. The cache is valid
+    only when it covers every currently-selected candidate ID — if the
+    selection has changed since the cache was written (e.g. new --client
+    triggered re-rank), the cache is rebuilt rather than silently returning
+    stale framings for a different set of clips."""
     import cv2
+    import dataclasses as _dc
     cache = job.work_dir / "framing.json"
     if cache.exists():
-        return [Framing(**d) for d in cache_read(cache)]
+        # Forward-compat: drop unknown keys so old-schema caches still load.
+        known = {f.name for f in _dc.fields(Framing)}
+        cached = [
+            Framing(**{k: v for k, v in d.items() if k in known})
+            for d in cache_read(cache)
+        ]
+        cached_ids = {f.id for f in cached}
+        selected_ids = {c.id for c in selected}
+        if selected_ids.issubset(cached_ids):
+            # Filter to current selection (cache may carry extras from a
+            # larger previous run; that's fine, we just don't return them).
+            return [f for f in cached if f.id in selected_ids]
+        missing = selected_ids - cached_ids
+        print(f"[framing] cache covers {sorted(cached_ids)} but selection "
+              f"needs {sorted(selected_ids)} (missing {sorted(missing)}); "
+              f"rebuilding", file=sys.stderr)
 
     face_cascade_path = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
     face_cascade = cv2.CascadeClassifier(face_cascade_path)
