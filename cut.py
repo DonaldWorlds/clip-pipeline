@@ -37,8 +37,24 @@ from clip_pipeline.validate import technical as verify
 
 
 def _select_top_n(cands, n: int):
+    """Pick the top-N candidates by final_score, then renumber them
+    sequentially (01, 02, 03, ...) for clean output filenames.
+
+    The original Marengo-rank IDs (e.g. "07" if Marengo's 7th-ranked moment
+    won the rerank) are still preserved in `graded_reranked.json` keyed by
+    their original IDs. The renumber-to-sequential mapping is logged to
+    stderr so cross-referencing is one log scroll away."""
     sorted_cs = sorted(cands, key=lambda c: -c.score)
-    return sorted_cs[: max(1, n)]
+    top = sorted_cs[: max(1, n)]
+    if top:
+        print("[select] renumbering top-N to sequential output IDs:", file=sys.stderr)
+    for i, c in enumerate(top, 1):
+        original_id = c.id
+        c.id = f"{i:02d}"
+        print(f"        {c.id} <- (was {original_id})  "
+              f"[{c.start:.1f}-{c.end:.1f}]  score={c.score:.4f}  "
+              f"rationale={c.rationale!r}", file=sys.stderr)
+    return top
 
 
 def main():
