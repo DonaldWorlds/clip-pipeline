@@ -29,7 +29,6 @@ from clip_pipeline import config as cfg
 from clip_pipeline import profile as profile_mod
 from clip_pipeline import source
 from clip_pipeline.analyze import detect, framing, moment_intelligence, whisper
-from clip_pipeline.editorial import copy as post_copy
 from clip_pipeline.editorial import decisions as editorial_decisions
 from clip_pipeline.rag import retrieve as rag_retrieve
 from clip_pipeline.render import pool as render
@@ -202,11 +201,9 @@ def main():
                                  profile, recs)
     print(f"[cut] rendered {len(produced)} MP4s", file=sys.stderr)
 
-    # 5.7. Social post copy — gated on profile.generate_post_copy.
-    if profile.generate_post_copy:
-        posts = post_copy.generate_all(job, selected)
-        print(f"[cut] post copy generated for {len(posts)} clip(s)",
-              file=sys.stderr)
+    # 5.7. Social post copy — REMOVED. Was a Pegasus.analyze call that uses
+    # video_id, deprecated in pegasus1.5. Re-add via the video-object API if
+    # this ever becomes a priority. For now: copy can be written by hand.
 
     # 6a. Technical verification.
     report = verify.run(job, produced)

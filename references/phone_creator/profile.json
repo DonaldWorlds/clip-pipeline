@@ -1,0 +1,39 @@
+{
+  "client": "phone_creator",
+  "derived_at": "2026-05-16T05:22:17Z",
+  "n_references": 9,
+  "delivery_aspects": [
+    "9:16"
+  ],
+  "typical_clip_length_s": 35.52,
+  "caption": {
+    "mode": "karaoke_word",
+    "position": "lower_third",
+    "font": "Impact",
+    "font_px_at_1080": 70,
+    "primary_color": "&H00FFFFFF",
+    "highlight_color": "&H0000FFFF",
+    "outline_color": "&H00000000",
+    "outline_width": 6,
+    "y_frac": 0.85,
+    "derivation_confidence": 0.9
+  },
+  "color_grade": {
+    "brightness_target": 84.6,
+    "saturation_target": 1.0,
+    "contrast_target": 1.0,
+    "color_temp": "warm"
+  },
+  "use_upscaling": false,
+  "source_fingerprint_ids": [
+    "snaptik_70",
+    "snaptik_71",
+    "snaptik_72",
+    "snaptik_73",
+    "snaptik_74",
+    "snaptik_75",
+    "snaptik_76",
+    "snaptik_78",
+    "snaptik_79"
+  ]
+}

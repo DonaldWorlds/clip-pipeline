@@ -68,7 +68,6 @@ class ClientStyleProfile:
     color_grade: ColorGrade = field(default_factory=ColorGrade)
 
     use_upscaling: bool = False
-    generate_post_copy: bool = True
 
     source_fingerprint_ids: list[str] = field(default_factory=list)
 
@@ -88,7 +87,6 @@ class ClientStyleProfile:
             caption=CaptionStyle(**cap) if cap else CaptionStyle(),
             color_grade=ColorGrade(**cg) if cg else ColorGrade(),
             use_upscaling=bool(raw.get("use_upscaling", False)),
-            generate_post_copy=bool(raw.get("generate_post_copy", True)),
             source_fingerprint_ids=list(raw.get("source_fingerprint_ids") or []),
         )
 
@@ -311,7 +309,6 @@ def derive_from_references(client: str) -> ClientStyleProfile | None:
             color_temp=temp,
         ),
         use_upscaling=use_upscaling,
-        generate_post_copy=True,
         source_fingerprint_ids=[str(f.get("id", "?")) for f in fps],
     )
     return profile
