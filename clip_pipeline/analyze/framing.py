@@ -46,7 +46,11 @@ STATIC_FRAME_DIFF = 6.0
 STATIC_SUBJECT_VAR = 200
 FROZEN_FRAME_DIFF = 0.5
 
-ZOOM_START = 1.00
+ZOOM_START = 1.02   # NOT 1.0 — ffmpeg zoompan has a chroma edge case at exactly
+                    # z=1.0 that causes the first ~1.5s of output to render as
+                    # B&W until the encoder's next keyframe refreshes chroma.
+                    # Starting at 1.02 avoids the edge case while still being
+                    # visually identical to "no zoom" at the start.
 ZOOM_END = 1.08
 
 # All aspects rendered for every clip — client wants delivery flexibility.
