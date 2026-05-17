@@ -87,6 +87,50 @@ def _probe_fps(path: Path) -> float:
     return float(fps)
 
 
+def _measure_clip_brightness(clip_path: Path) -> float:
+    """Sample 5 frames evenly across the clip and return the median mean-Y
+    luminance (0-255 scale). Used by the source-aware brightness adjustment:
+    the naive `(target - 128) / 128` math assumes the source starts at 128
+    (neutral mid-gray), but real sources rarely do — this measures the
+    actual source so the shift toward the target is correct in direction
+    and magnitude."""
+    import cv2
+    import numpy as np
+    cap = cv2.VideoCapture(str(clip_path))
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+    if total <= 0:
+        cap.release()
+        return 128.0
+    samples = []
+    for pos in (0.10, 0.30, 0.50, 0.70, 0.90):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(total * pos))
+        ok, frame = cap.read()
+        if ok and frame is not None:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            samples.append(float(np.mean(gray)))
+    cap.release()
+    if not samples:
+        return 128.0
+    return float(np.median(samples))
+
+
+def _source_aware_brightness_filter(
+    clip_path: Path, target: float, cap: float = 0.20,
+) -> str | None:
+    """Compute the actual brightness shift needed to land near `target`
+    given the source's measured mean Y. Caps the shift to ±`cap` so a
+    massive source/target gap can't crush or blow out the image entirely.
+    Returns the ffmpeg `eq=brightness=...` term, or None if the delta is
+    too small to matter (< 0.02)."""
+    source_mean = _measure_clip_brightness(clip_path)
+    # ffmpeg eq=brightness is on a -1.0..+1.0 scale that adds to normalized
+    # pixel Y. To shift the source mean toward `target`, delta = (target -
+    # source) / 255 (since brightness is on a 0-1 normalized scale).
+    delta = (target - source_mean) / 255.0
+    delta = max(-cap, min(cap, delta))
+    return f"eq=brightness={delta:.3f}" if abs(delta) >= 0.02 else None
+
+
 # ---------- filter builders ----------
 
 def _simple_aspect_filter(aspect: str, crop_tightness: float = 0.0,
@@ -99,11 +143,11 @@ def _simple_aspect_filter(aspect: str, crop_tightness: float = 0.0,
 
     if not speaker_rect or crop_tightness <= 0 or src_w == 0:
         if aspect == "9:16":
-            return "scale=-2:1920,crop=1080:1920"
+            return "scale=-2:1920:flags=lanczos,crop=1080:1920"
         if aspect == "1:1":
-            return "scale=-2:1080,crop=1080:1080"
+            return "scale=-2:1080:flags=lanczos,crop=1080:1080"
         if aspect == "16:9":
-            return "scale=1920:-2,crop=1920:1080"
+            return "scale=1920:-2:flags=lanczos,crop=1920:1080"
 
     out_aspect = out_w / out_h
     src_aspect = src_w / src_h
@@ -138,7 +182,7 @@ def _simple_aspect_filter(aspect: str, crop_tightness: float = 0.0,
 
     return (
         f"crop={int(win_w)}:{int(win_h)}:{int(win_x)}:{int(win_y)},"
-        f"scale={out_w}:{out_h}"
+        f"scale={out_w}:{out_h}:flags=lanczos"
     )
 
 
@@ -170,12 +214,12 @@ def _composite_overlay_filter(
         fg = (
             f"[0:v]crop={rw}:{rh}:{rx}:{ry},"
             f"scale={out_w}:{out_h}:force_original_aspect_ratio=decrease"
-            f"[fg]"
+            f":flags=lanczos[fg]"
         )
 
     bg = (
-        f"[0:v]scale={out_w}:{out_h}:force_original_aspect_ratio=increase,"
-        f"crop={out_w}:{out_h},boxblur=30:1"
+        f"[0:v]scale={out_w}:{out_h}:force_original_aspect_ratio=increase"
+        f":flags=lanczos,crop={out_w}:{out_h},boxblur=30:1"
         f"[bg]"
     )
     composite = "[bg][fg]overlay=(W-w)/2:(H-h)/2[outv]"
@@ -251,6 +295,7 @@ def _render_one(
     words_for_clip: list[Word],
     recommendation: dict,
     grade_filter: str | None,
+    brightness_target: float,
 ) -> Path:
     work = job.work_dir
     out_dir = job.output_dir
@@ -299,6 +344,9 @@ def _render_one(
             suffix_filters.append(sharpen_f)
         if grade_filter:
             suffix_filters.append(grade_filter)
+        bright_f = _source_aware_brightness_filter(clip_path, brightness_target)
+        if bright_f:
+            suffix_filters.append(bright_f)
         suffix_filters.append(f"ass={_escape_ass_filter_path(ass_path)}")
         vf += ";[outv]" + ",".join(suffix_filters) + "[final]"
 
@@ -342,6 +390,14 @@ def _render_one(
             filters.append(sharpen_f)
         if grade_filter:
             filters.append(grade_filter)
+        # Source-aware brightness shift. Measures the clip's actual luminance
+        # and shifts toward profile.color_grade.brightness_target. Capped at
+        # ±0.20 so the math can't crush or blow out the image. Applied AFTER
+        # the color grade (which is just temp+contrast+saturation) so its
+        # contribution is independent and easy to disable.
+        bright_f = _source_aware_brightness_filter(clip_path, brightness_target)
+        if bright_f:
+            filters.append(bright_f)
         filters.append(f"ass={_escape_ass_filter_path(ass_path)}")
         vf = ",".join(filters)
 
@@ -437,6 +493,7 @@ def render_all(
     framing_by_id = {f.id: f for f in framings}
     caption_dict = _profile_to_caption_dict(profile)
     grade_filter = build_grade_filter(profile.color_grade)
+    brightness_target = float(profile.color_grade.brightness_target)
 
     # Stage A — serial prep (trim + optional ESRGAN, must be serial because
     # GFPGAN/ESRGAN can't share an MPS device across worker processes).
@@ -468,6 +525,7 @@ def render_all(
             jobs_list.append((
                 job, source, cand, framing, aspect,
                 caption_dict, words_for_clip, rec, grade_filter,
+                brightness_target,
             ))
 
     print(f"[render] running {len(jobs_list)} renders, "
