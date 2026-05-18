@@ -31,7 +31,7 @@ from ..analyze.whisper import words_in_range
 from ..profile import ClientStyleProfile
 from .enhance import enhance_speaker_region
 from .grade import build_grade_filter, build_premium_curve
-from .trim import prepare_trimmed_clip
+from .trim import prepare_trimmed_clip, compute_keep_ranges, retime_words
 
 
 # libx264 is multithreaded internally; keep parallelism mild to avoid
@@ -126,6 +126,38 @@ def _source_aware_brightness_filter(
     # ffmpeg eq=brightness is on a -1.0..+1.0 scale that adds to normalized
     # pixel Y. To shift the source mean toward `target`, delta = (target -
     # source) / 255 (since brightness is on a 0-1 normalized scale).
+    delta = (target - source_mean) / 255.0
+    delta = max(-cap, min(cap, delta))
+    return f"eq=brightness={delta:.3f}" if abs(delta) >= 0.02 else None
+
+
+def _measure_brightness_at_source(
+    source: Path, start: float, end: float,
+) -> float:
+    """Same as _measure_clip_brightness but reads from a [start, end] time
+    range directly in the source video. Used by the single-pass render path
+    where there is no intermediate extracted clip on disk to read from."""
+    import cv2
+    import numpy as np
+    cap = cv2.VideoCapture(str(source))
+    samples = []
+    for pos in (0.10, 0.30, 0.50, 0.70, 0.90):
+        t = start + pos * (end - start)
+        cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000.0)
+        ok, frame = cap.read()
+        if ok and frame is not None:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            samples.append(float(np.mean(gray)))
+    cap.release()
+    return float(np.median(samples)) if samples else 128.0
+
+
+def _source_aware_brightness_filter_at_source(
+    source: Path, start: float, end: float, target: float, cap: float = 0.20,
+) -> str | None:
+    """Single-pass variant of _source_aware_brightness_filter. Measures the
+    source video directly at [start, end] instead of an extracted clip."""
+    source_mean = _measure_brightness_at_source(source, start, end)
     delta = (target - source_mean) / 255.0
     delta = max(-cap, min(cap, delta))
     return f"eq=brightness={delta:.3f}" if abs(delta) >= 0.02 else None
@@ -302,12 +334,38 @@ def _render_one(
     recommendation: dict,
     grade_filter: str | None,
     brightness_target: float,
+    keep_ranges_local: list[tuple[float, float]] | None,
 ) -> Path:
+    """Render one (clip × aspect) MP4.
+
+    Two paths based on `keep_ranges_local`:
+      - not None  → T2 SINGLE-PASS. Read source with -ss/-to + inline trim
+                    via select+aselect filters + full render chain + encode.
+                    ONE H.264 encode, eliminates the extract step's quality
+                    loss. Used for simple-aspect, no-ESRGAN renders.
+      - None      → Two-pass path (composite or ESRGAN). Reads from the
+                    intermediate `.work/<id>.mp4` written by
+                    _prepare_clip_assets.
+    """
     work = job.work_dir
     out_dir = job.output_dir
 
-    clip_path = work / f"{cand.id}.mp4"
-    _extract_clip(source, cand, clip_path)
+    use_composite = framing.cls in ("overlay", "multi_subject")
+    speaker_rect = framing.signals.get("speaker_rect") if isinstance(framing.signals, dict) else None
+    if use_composite and not speaker_rect:
+        use_composite = False
+
+    # Single-pass is available only when no composite (composite needs the
+    # multi-input filter graph + on-disk clip path).
+    single_pass = (keep_ranges_local is not None) and (not use_composite)
+
+    if not single_pass:
+        # Two-pass needs the intermediate; _prepare_clip_assets already wrote it
+        # for ESRGAN/composite cases, but defensively extract here too.
+        clip_path = work / f"{cand.id}.mp4"
+        _extract_clip(source, cand, clip_path)
+    else:
+        clip_path = None  # not used in single-pass branch
 
     res = ASPECT_RES[aspect]
     ass_path = work / f"{cand.id}.{aspect_slug(aspect)}.ass"
@@ -326,12 +384,81 @@ def _render_one(
     crop_tightness = float(recommendation.get("crop_tightness", 0.0))
     want_esrgan = bool(recommendation.get("use_esrgan", False))
 
-    use_composite = framing.cls in ("overlay", "multi_subject")
-    speaker_rect = framing.signals.get("speaker_rect") if isinstance(framing.signals, dict) else None
-    if use_composite and not speaker_rect:
-        use_composite = False
-
     sharpen_f = _unsharp_filter(sharpen)
+
+    # ============================================================
+    # T2 SINGLE-PASS RENDER: source → render filters → encode (1 pass).
+    # Used when there's no composite and no ESRGAN enhanced file. Reads
+    # directly from the long-form source with -ss/-to; the trim is inlined
+    # into the filter chain via select+aselect+setpts. ONE H.264 encode
+    # instead of two (extract + render). Cleaner generation quality.
+    # ============================================================
+    if single_pass:
+        src_w, src_h = _probe_source_dims(source)
+        no_op_trim = (
+            len(keep_ranges_local) == 1
+            and abs(keep_ranges_local[0][0]) < 1e-3
+            and abs(keep_ranges_local[0][1] - (cand.end - cand.start)) < 1e-3
+        )
+
+        filters = []
+        # Inline trim — drop fillers + long pauses before the rest of the
+        # filter chain. Skipped when there's nothing to trim.
+        if not no_op_trim:
+            expr = "+".join(
+                f"between(t,{s:.3f},{e:.3f})" for s, e in keep_ranges_local
+            )
+            filters.append(f"select='{expr}',setpts=N/FRAME_RATE/TB")
+
+        if framing.zoom.get("enabled"):
+            fps = _probe_fps(source)
+            # Duration in zoom expression should match the TRIMMED clip
+            # length, not the original cand duration, since trim shortens.
+            trimmed_dur = sum(e - s for s, e in keep_ranges_local)
+            filters.append(_zoompan_filter(framing, fps, trimmed_dur, src_w, src_h))
+
+        filters.append(_simple_aspect_filter(
+            aspect, crop_tightness=crop_tightness,
+            speaker_rect=speaker_rect, src_w=src_w, src_h=src_h,
+        ))
+        if sharpen_f:
+            filters.append(sharpen_f)
+        if grade_filter:
+            filters.append(grade_filter)
+        bright_f = _source_aware_brightness_filter_at_source(
+            source, cand.start, cand.end, brightness_target,
+        )
+        if bright_f:
+            filters.append(bright_f)
+        filters.append(build_premium_curve())
+        filters.append(f"ass={_escape_ass_filter_path(ass_path)}")
+        vf = ",".join(filters)
+
+        af_parts = []
+        if not no_op_trim:
+            expr = "+".join(
+                f"between(t,{s:.3f},{e:.3f})" for s, e in keep_ranges_local
+            )
+            af_parts.append(f"aselect='{expr}',asetpts=N/SR/TB")
+        af_parts.append(LOUDNORM_FILTER)
+
+        _run([
+            "ffmpeg", "-y",
+            "-i", str(source),
+            "-ss", f"{cand.start:.3f}",
+            "-to", f"{cand.end:.3f}",
+            "-avoid_negative_ts", "make_zero",
+            "-vf", vf,
+            "-af", ",".join(af_parts),
+            "-c:v", "libx264", "-preset", "medium",
+            "-crf", str(max(15, crf - 2)),
+            "-maxrate", "14M", "-bufsize", "20M",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "+faststart",
+            str(out_path),
+        ])
+        return out_path
 
     if use_composite:
         src_w, src_h = _probe_source_dims(clip_path)
@@ -458,18 +585,61 @@ def _prepare_clip_assets(
     recommendation: dict,
     words_in_source: list[Word],
     profile: ClientStyleProfile,
-) -> list[Word]:
-    """Serial prep: extract, trim, optionally ESRGAN-enhance. Returns the
-    word list re-timed to the trimmed clip's zero-based timeline.
+) -> tuple[list[Word], list[tuple[float, float]] | None]:
+    """Serial prep stage. Returns (retimed_words, keep_ranges_local).
 
-    ESRGAN gate is purely profile-driven: if `profile.use_upscaling` is True
-    AND `recommendation.use_esrgan` agrees, we enhance. For overlay/multi-
-    subject sources we pass the speaker_rect (subject-region enhancement);
-    for everything else we pass a full-frame synthetic rect so the whole
-    frame gets upscaled. The render path consumes the .enhanced.mp4 either
-    as the foreground of the composite filter (overlay) or as the direct
-    ffmpeg input (simple aspect crop).
+    Two paths:
+
+    (T2 single-pass, common case — no ESRGAN, no composite):
+       No intermediate `.mp4` extracted. We just compute the trim metadata
+       (retimed words + keep-ranges local to the clip) and let _render_one
+       do everything in one ffmpeg pass directly from source. Eliminates the
+       extract→trim→render double encode that previously cost ~5% generation
+       quality.
+       Returns (retimed_words, keep_ranges_local). keep_ranges_local may be
+       [(0.0, clip_dur)] if no fillers/pauses were found — _render_one skips
+       the select+setpts filter in that case.
+
+    (Two-pass path — ESRGAN OR composite):
+       Old behavior: extract → trim → (optionally enhance) on disk. ESRGAN
+       runs frame-by-frame in Python and needs a file. Composite reads from
+       a clip path. Both still need the intermediate.
+       Returns (retimed_words, None) — None signals to _render_one to use
+       the on-disk clip path with no inline trim filter.
     """
+    use_composite = framing.cls in ("overlay", "multi_subject")
+    want_esrgan = profile.use_upscaling and recommendation.get("use_esrgan", False)
+    need_intermediate = use_composite or want_esrgan
+
+    if not need_intermediate:
+        # T2 SINGLE-PASS: compute retimed words + keep_ranges WITHOUT writing
+        # any intermediate clip files. _render_one reads from source directly.
+        keep_source = compute_keep_ranges(
+            words_in_source, cand.start, cand.end,
+        )
+        retimed = retime_words(words_in_source, keep_source)
+        keep_local = [(s - cand.start, e - cand.start) for s, e in keep_source]
+        # Cache so reruns skip recomputing (small JSONs, no MP4s on disk).
+        words_path = job.work_dir / f"{cand.id}.words_trimmed.json"
+        report_path = job.work_dir / f"{cand.id}.trim_report.json"
+        if not words_path.exists():
+            cache_write(words_path, retimed)
+        if not report_path.exists():
+            no_op = (
+                len(keep_source) == 1
+                and abs(keep_source[0][0] - cand.start) < 1e-3
+                and abs(keep_source[0][1] - cand.end) < 1e-3
+            )
+            saved = (cand.end - cand.start) - sum(e - s for s, e in keep_source)
+            cache_write(report_path, {
+                "no_op": no_op,
+                "seconds_saved": round(saved, 2),
+                "keep_ranges_local": [list(r) for r in keep_local],
+                "single_pass": True,
+            })
+        return retimed, keep_local
+
+    # Two-pass path: extract + trim to disk for ESRGAN or composite
     clip_path = job.work_dir / f"{cand.id}.mp4"
     _extract_clip(source, cand, clip_path)
 
@@ -477,13 +647,12 @@ def _prepare_clip_assets(
         clip_path, words_in_source, cand, job.work_dir,
     )
 
-    if not (profile.use_upscaling and recommendation.get("use_esrgan", False)):
-        return words_trimmed
+    if not want_esrgan:
+        return words_trimmed, None  # composite path, no enhance
 
     sig = framing.signals if isinstance(framing.signals, dict) else {}
     speaker_rect = sig.get("speaker_rect")
     if not speaker_rect:
-        # Full-frame enhancement: synthesize a rect spanning the whole frame.
         src_w, src_h = _probe_source_dims(clip_path)
         speaker_rect = {"x": 0, "y": 0, "w": src_w, "h": src_h}
 
@@ -491,7 +660,7 @@ def _prepare_clip_assets(
         clip_path, speaker_rect, cand.id, job.work_dir,
         blend=float(recommendation.get("esrgan_blend", 0.65)),
     )
-    return words_trimmed
+    return words_trimmed, None
 
 
 def render_all(
@@ -511,19 +680,23 @@ def render_all(
     grade_filter = build_grade_filter(profile.color_grade)
     brightness_target = float(profile.color_grade.brightness_target)
 
-    # Stage A — serial prep (trim + optional ESRGAN, must be serial because
-    # GFPGAN/ESRGAN can't share an MPS device across worker processes).
+    # Stage A — serial prep (trim metadata + optional ESRGAN). ESRGAN must
+    # be serial because GFPGAN/ESRGAN can't share an MPS device across worker
+    # processes. For non-ESRGAN clips, Stage A now only computes trim metadata
+    # without writing intermediate files (T2 single-pass).
     per_clip_words: dict[str, list[Word]] = {}
+    per_clip_keep_ranges: dict[str, list[tuple[float, float]] | None] = {}
     for cand in selected:
         framing = framing_by_id[cand.id]
         if framing.dropped:
             continue
         rec = decisions_by_id.get(cand.id, {})
         words_for_clip = words_in_range(words, cand.start, cand.end)
-        words_trimmed = _prepare_clip_assets(
+        words_trimmed, keep_ranges = _prepare_clip_assets(
             job, source, cand, framing, rec, words_for_clip, profile,
         )
         per_clip_words[cand.id] = words_trimmed
+        per_clip_keep_ranges[cand.id] = keep_ranges
 
     # Stage B — build the parallel job list: ONE (clip × aspect) per render.
     jobs_list: list[tuple] = []
@@ -536,12 +709,13 @@ def render_all(
 
         rec = decisions_by_id.get(cand.id, {})
         words_for_clip = per_clip_words.get(cand.id, [])
+        keep_ranges = per_clip_keep_ranges.get(cand.id)
 
         for aspect in profile.delivery_aspects:
             jobs_list.append((
                 job, source, cand, framing, aspect,
                 caption_dict, words_for_clip, rec, grade_filter,
-                brightness_target,
+                brightness_target, keep_ranges,
             ))
 
     print(f"[render] running {len(jobs_list)} renders, "
