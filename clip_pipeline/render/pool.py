@@ -116,7 +116,7 @@ def _measure_clip_brightness(clip_path: Path) -> float:
 
 
 def _source_aware_brightness_filter(
-    clip_path: Path, target: float, cap: float = 0.20,
+    clip_path: Path, target: float, cap: float = 0.12,
 ) -> str | None:
     """Compute the actual brightness shift needed to land near `target`
     given the source's measured mean Y. Caps the shift to ±`cap`.
@@ -124,16 +124,21 @@ def _source_aware_brightness_filter(
     Pairs the brightness shift with a saturation BOOST to compensate. Without
     this, an additive brightness shift flattens RGB channel ratios — measured
     on user content: shift +0.18 reduced saturation from 88 to 30 (~66% loss),
-    making clips look ashy/washed-out. Saturation boost = 1 + |delta| × 5.0
-    restores the vibrancy at 0..0.20 brightness range. ffmpeg eq=saturation
-    accepts 0.0..3.0 so we stay well within bounds.
+    making clips look ashy/washed-out. Saturation boost = 1 + |delta| × 6.0
+    restores the vibrancy. ffmpeg eq=saturation accepts 0.0..3.0 so we stay
+    well within bounds.
+
+    Tuned for the user's preference: cap=0.12 (lifts a dim source toward
+    references but stops short of "white-washed" appearance). For source
+    at Y=50 with target=85, this produces brightness=+0.12 → output Y~80,
+    with saturation=1.72 to keep color punch.
     """
     source_mean = _measure_clip_brightness(clip_path)
     delta = (target - source_mean) / 255.0
     delta = max(-cap, min(cap, delta))
     if abs(delta) < 0.02:
         return None
-    sat = 1.0 + abs(delta) * 5.0
+    sat = 1.0 + abs(delta) * 6.0
     return f"eq=brightness={delta:.3f}:saturation={sat:.2f}"
 
 
@@ -159,17 +164,17 @@ def _measure_brightness_at_source(
 
 
 def _source_aware_brightness_filter_at_source(
-    source: Path, start: float, end: float, target: float, cap: float = 0.20,
+    source: Path, start: float, end: float, target: float, cap: float = 0.12,
 ) -> str | None:
     """Single-pass variant of _source_aware_brightness_filter. Measures the
     source video directly at [start, end] instead of an extracted clip.
-    Same saturation-boost compensation."""
+    Same saturation-boost compensation, same cap=0.12 tuning."""
     source_mean = _measure_brightness_at_source(source, start, end)
     delta = (target - source_mean) / 255.0
     delta = max(-cap, min(cap, delta))
     if abs(delta) < 0.02:
         return None
-    sat = 1.0 + abs(delta) * 5.0
+    sat = 1.0 + abs(delta) * 6.0
     return f"eq=brightness={delta:.3f}:saturation={sat:.2f}"
 
 
