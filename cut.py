@@ -275,12 +275,14 @@ def main():
             )
     elif in_path.suffix.lower() in VIDEO_SUFFIXES:
         job = _build_job_from_video(in_path)
+        job_auto_built = True
         if args.source:
             print(f"[cut] WARNING: --source ignored when input is a video file",
                   file=sys.stderr)
     else:
         sys.exit(f"unknown input type {in_path.suffix!r}; expected .json or a "
                  f"video file ({', '.join(sorted(VIDEO_SUFFIXES))})")
+    job_auto_built = locals().get("job_auto_built", False)
 
     if args.detection_backend:
         job.detection_backend = args.detection_backend
@@ -317,7 +319,16 @@ def main():
         else "remote"
     )
     run_id = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    job._delivery_dir = job.output_dir / source_stem / f"run_{run_id}"
+    # Skip the source_stem inner folder when the job was AUTO-built from a
+    # video path — the source_stem is already in job.output_dir (`out/<stem>`),
+    # nesting it again produces `out/<stem>/<stem>/run_<ts>` which was the
+    # double-nesting bug. When the job came from a JSON file, output_dir is
+    # client-named (`out/phone_creator`) and we DO want source_stem nesting
+    # so multiple sources don't collide.
+    if job_auto_built:
+        job._delivery_dir = job.output_dir / f"run_{run_id}"
+    else:
+        job._delivery_dir = job.output_dir / source_stem / f"run_{run_id}"
     job.delivery_dir.mkdir(parents=True, exist_ok=True)
     print(f"[cut] delivery dir: {job.delivery_dir}", file=sys.stderr)
 
