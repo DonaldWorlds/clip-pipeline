@@ -439,7 +439,10 @@ def _render_one(
         )
         if bright_f:
             filters.append(bright_f)
-        filters.append(build_premium_curve())
+        # Premium tone curve disabled per user preference — its shadow lift
+        # produced a milky/ashy look on the user's source. Brightness +
+        # saturation alone gives a cleaner result. Reachable via
+        # build_premium_curve() if profile-driven curves get added later.
         filters.append(f"ass={_escape_ass_filter_path(ass_path)}")
         vf = ",".join(filters)
 
@@ -489,7 +492,7 @@ def _render_one(
         bright_f = _source_aware_brightness_filter(clip_path, brightness_target)
         if bright_f:
             suffix_filters.append(bright_f)
-        suffix_filters.append(build_premium_curve())
+        # Premium curve disabled — see comment above the simple-aspect path.
         suffix_filters.append(f"ass={_escape_ass_filter_path(ass_path)}")
         vf += ";[outv]" + ",".join(suffix_filters) + "[final]"
 
@@ -543,9 +546,9 @@ def _render_one(
         bright_f = _source_aware_brightness_filter(clip_path, brightness_target)
         if bright_f:
             filters.append(bright_f)
-        # Premium tone curve — applied AFTER brightness lift so it shapes
-        # the already-lifted image (lifted shadows + soft highlight rolloff).
-        filters.append(build_premium_curve())
+        # Premium tone curve disabled per user preference — its shadow lift
+        # produced a milky/ashy look on the user's source. Brightness +
+        # saturation alone gives a cleaner result.
         filters.append(f"ass={_escape_ass_filter_path(ass_path)}")
         vf = ",".join(filters)
 
