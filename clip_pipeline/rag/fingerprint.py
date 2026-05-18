@@ -215,6 +215,12 @@ def _editorial_fingerprint(visual: VisualSignature, duration_s: float, fps: floa
     )
 
 
+# Module-level cache to suppress repeated Pegasus error noise during a
+# batch ingest of references. First failure prints a single explanatory
+# message; subsequent calls return silently.
+_PEGASUS_AVAILABLE: bool | None = None
+
+
 def _pegasus_description(
     video_id: str,
     niche: str,
@@ -222,6 +228,9 @@ def _pegasus_description(
 ) -> PegasusDescription:
     """Call Pegasus to describe the reference clip. Returns empty PegasusDescription
     on any failure (we don't crash the ingest)."""
+    global _PEGASUS_AVAILABLE
+    if _PEGASUS_AVAILABLE is False:
+        return PegasusDescription()  # silent skip — known unavailable this run
     import os
     if not os.environ.get("TWELVELABS_API_KEY"):
         return PegasusDescription()
@@ -233,7 +242,6 @@ def _pegasus_description(
             views=engagement.get("views", "unknown"),
             likes=engagement.get("likes", "unknown"),
         )
-        # NOTE: pegasus1.5 may not accept video_id; pegasus1.2 still does.
         resp = client.analyze(
             video_id=video_id,
             model_name="pegasus1.2",
@@ -241,8 +249,17 @@ def _pegasus_description(
             temperature=0.3,
         )
     except Exception as e:
+        msg = str(e)
+        if "index_not_supported_for_generate" in msg or "video_id is not supported" in msg:
+            if _PEGASUS_AVAILABLE is None:
+                print(f"[twelvelabs] Pegasus generate not supported on this index — "
+                      f"reference descriptions will be left blank for this batch",
+                      file=sys.stderr)
+            _PEGASUS_AVAILABLE = False
+            return PegasusDescription()
         print(f"[fingerprint.pegasus] failed: {e}", file=sys.stderr)
         return PegasusDescription()
+    _PEGASUS_AVAILABLE = True
 
     text = getattr(resp, "data", None) or getattr(resp, "text", None) or str(resp)
     text = text.strip()

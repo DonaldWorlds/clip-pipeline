@@ -1,28 +1,24 @@
 #!/usr/bin/env python3
-"""cut.py — orchestrator for the client-style clip pipeline.
+"""cut.py — orchestrator for the clip pipeline.
+
+Simplest usage (no setup required):
+    python cut.py /path/to/your-video.mp4
+
+Power-user usage (per-client style learned from references):
+    python cut.py /path/to/your-video.mp4 --client fitness_creator
+    python cut.py jobs/myjob.json   # legacy: job file still works
 
 Style is learned from references; this script is a delivery mechanism.
-
-Pipeline:
-    1.   whisper.transcribe         (full-video word transcription)
-    3.   detect.find_candidates     (TwelveLabs Pegasus / local backend → graded.json)
-    4.   top-N selection
-    4.5. framing.analyze            (face + HOG + motion)
-    4.6. profile.load(--client)     (ClientStyleProfile from references/<client>/profile.json)
-    4.7. rag.retrieve               (per-clip retrieved references, when --client passed)
-    4.8. editorial.decisions        (per-clip render parameters, grounded in profile + refs)
-    5.   render.render_all          (one MP4 per clip × profile.delivery_aspects)
-    6.   verify.run + editorial.run (technical + editorial validation)
-
-Run:
-    python cut.py jobs/myjob.json --client fitness_creator_v1 --source video.mp4
-
-Details: docs/superpowers/specs/2026-05-15-phase5a-client-style-profile-design.md
 """
 from __future__ import annotations
 
 import argparse
+import contextlib
+import json
+import subprocess
 import sys
+import time
+from datetime import datetime
 from pathlib import Path
 
 from clip_pipeline import config as cfg
@@ -36,28 +32,55 @@ from clip_pipeline.validate import editorial as editorial_validate
 from clip_pipeline.validate import technical as verify
 
 
-def _probe_source_quality(src_path: Path) -> None:
-    """Print source video/audio specs at startup. Warns if the source is
-    below thresholds that limit output quality (resolution, bitrate, audio
-    spec). Diagnostic only — does not refuse to render. Helps the operator
-    set client expectations: low-quality input → limits on output quality."""
-    import subprocess
-    import json as _json
+VIDEO_SUFFIXES = {".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi"}
+
+
+# ============================================================
+# Progress indicator
+# ============================================================
+
+@contextlib.contextmanager
+def _stage(name: str, idx: int, total: int):
+    """Wrap a pipeline stage with a labeled start/duration line.
+    Inner logs from the stage (whisper progress, ffmpeg, etc) still print
+    between the start and end markers — they're not suppressed, just framed.
+    """
+    print(f"[{idx}/{total}] {name}...", file=sys.stderr, flush=True)
+    t0 = time.time()
+    try:
+        yield
+    finally:
+        dt = time.time() - t0
+        print(f"[{idx}/{total}] {name} done in {dt:.1f}s", file=sys.stderr, flush=True)
+
+
+# ============================================================
+# Source probe — duration, quality, recommended top_n
+# ============================================================
+
+def _probe_source(src_path: Path) -> dict:
+    """ffprobe the source: return dict with duration_s, video specs, audio specs,
+    and a recommended top_n based on duration. Prints warnings for substandard
+    source quality. Returns {} if probe fails."""
     try:
         result = subprocess.run(
             ["ffprobe", "-v", "error", "-print_format", "json",
              "-show_format", "-show_streams", str(src_path)],
             capture_output=True, text=True, check=True,
         )
-        data = _json.loads(result.stdout)
+        data = json.loads(result.stdout)
     except Exception as e:
         print(f"[source] quality probe failed: {e}", file=sys.stderr)
-        return
+        return {}
 
     v = next((s for s in data.get("streams", []) if s.get("codec_type") == "video"), None)
     a = next((s for s in data.get("streams", []) if s.get("codec_type") == "audio"), None)
     fmt = data.get("format", {})
+
     total_kbps = int(fmt.get("bit_rate", 0)) // 1000
+    duration_s = float(fmt.get("duration") or 0)
+
+    info: dict = {"duration_s": duration_s, "total_kbps": total_kbps}
 
     if v:
         w = int(v.get("width", 0))
@@ -69,9 +92,11 @@ def _probe_source_quality(src_path: Path) -> None:
             fps = round(float(num) / float(den), 1) if float(den) else 0
         except (ValueError, ZeroDivisionError):
             fps = 0
+        info["video"] = {"w": w, "h": h, "codec": codec, "fps": fps}
         print(f"[source] video: {w}x{h} {codec} @ {fps}fps, "
-              f"total bitrate ~{total_kbps}kbps", file=sys.stderr)
-        if h < 720:
+              f"total bitrate ~{total_kbps}kbps, duration {duration_s:.1f}s",
+              file=sys.stderr)
+        if h and h < 720:
             print(f"[source] WARNING: source is {h}p (< 720p). Output quality "
                   f"will be limited by source resolution.", file=sys.stderr)
         if total_kbps and total_kbps < 2000:
@@ -83,6 +108,7 @@ def _probe_source_quality(src_path: Path) -> None:
         sr = a.get("sample_rate", "?")
         ch = a.get("channels", 0)
         a_kbps = int(a.get("bit_rate", 0)) // 1000
+        info["audio"] = {"codec": codec, "sample_rate": sr, "channels": ch, "kbps": a_kbps}
         print(f"[source] audio: {codec} {ch}ch @ {sr}Hz, ~{a_kbps}kbps",
               file=sys.stderr)
         if a_kbps and a_kbps < 96:
@@ -90,15 +116,71 @@ def _probe_source_quality(src_path: Path) -> None:
                   f"96kbps — captions will be fine but audio fidelity is low.",
                   file=sys.stderr)
 
+    # Duration recommendations
+    if duration_s > 0:
+        if duration_s < 30:
+            print(f"[source] very short source ({duration_s:.0f}s). At most 1 useful "
+                  f"clip possible — recommend longer source (2-5 min ideal).",
+                  file=sys.stderr)
+        elif duration_s > 900:
+            print(f"[source] long source ({duration_s/60:.1f} min). Render will be slow. "
+                  f"Recommended sweet spot is 2-5 min.", file=sys.stderr)
+        elif duration_s < 60:
+            print(f"[source] short source ({duration_s:.0f}s). Sweet spot is 2-5 min.",
+                  file=sys.stderr)
+
+    info["recommended_top_n"] = _smart_top_n(duration_s)
+    return info
+
+
+def _smart_top_n(duration_s: float) -> int:
+    """Auto-pick top_n based on source duration. Bounded 1..10.
+       <60s  → 1 clip
+       60-180s → 3 clips
+       180-300s → 5 clips
+       300-600s → 7 clips
+       >600s → 10 clips
+    """
+    if duration_s <= 0:
+        return 3
+    minutes = duration_s / 60.0
+    if minutes < 1:
+        return 1
+    if minutes < 3:
+        return 3
+    if minutes < 5:
+        return 5
+    if minutes < 10:
+        return 7
+    return 10
+
+
+# ============================================================
+# Job construction
+# ============================================================
+
+def _build_job_from_video(video_path: Path) -> cfg.Job:
+    """Auto-build a Job dataclass for a direct video file input. Used when
+    the user runs `cut.py video.mp4` instead of `cut.py jobs/foo.json`.
+    output_dir is derived from the video's stem so multiple sources don't
+    collide in one folder."""
+    return cfg.Job(
+        source=str(video_path.expanduser().resolve()),
+        source_type="local",
+        output_dir=Path("out") / video_path.stem,
+        top_n=3,  # will be overridden later by smart_top_n or --top-n flag
+        detection_backend="auto",
+        whisper_model="small",
+    )
+
 
 def _select_top_n(cands, n: int):
     """Pick the top-N candidates by final_score, then renumber them
     sequentially (01, 02, 03, ...) for clean output filenames.
 
-    The original Marengo-rank IDs (e.g. "07" if Marengo's 7th-ranked moment
-    won the rerank) are still preserved in `graded_reranked.json` keyed by
-    their original IDs. The renumber-to-sequential mapping is logged to
-    stderr so cross-referencing is one log scroll away."""
+    The original Marengo-rank IDs are preserved in `graded_reranked.json`;
+    the renumber mapping is logged so cross-referencing is one scroll away.
+    """
     sorted_cs = sorted(cands, key=lambda c: -c.score)
     top = sorted_cs[: max(1, n)]
     if top:
@@ -112,12 +194,24 @@ def _select_top_n(cands, n: int):
     return top
 
 
+# ============================================================
+# Main
+# ============================================================
+
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("job", type=Path, help="Path to job JSON")
+    ap = argparse.ArgumentParser(
+        description="Clip pipeline: long-form video → short-form clips.",
+    )
+    ap.add_argument(
+        "source_or_job",
+        type=Path,
+        help="EITHER a path to a video file (.mp4/.mov/etc) for the simplest "
+             "usage, OR a path to a job JSON for power-user / multi-source workflows.",
+    )
     ap.add_argument(
         "--source",
-        help="Override job['source']. Local path or URL. Type auto-detected from prefix.",
+        help="Override the source from the job file (only meaningful when "
+             "source_or_job is a job JSON).",
     )
     ap.add_argument(
         "--source-type",
@@ -129,172 +223,200 @@ def main():
         choices=["auto", "twelvelabs", "local"],
         help="Override job['detection_backend'].",
     )
-    ap.add_argument("--top-n", type=int, help="Override job['top_n'].")
+    ap.add_argument(
+        "--no-twelvelabs",
+        action="store_true",
+        help="Skip TwelveLabs entirely — use local-only moment detection "
+             "(transcript-density based). Useful when the user can't or "
+             "doesn't want to upload footage to a third party.",
+    )
+    ap.add_argument(
+        "--top-n",
+        type=int,
+        help="How many clips to produce. Valid range 1..10. If omitted, "
+             "auto-picked from source duration (1min→1, 3min→3, 5min→5, "
+             "10min→7, >10min→10).",
+    )
     ap.add_argument("--keep-temp", action="store_true",
                     help="Retain .work/ intermediates after success.")
     ap.add_argument(
         "--client",
         help="Client name. Resolves to references/<client>/profile.json — the "
              "ClientStyleProfile that drives caption / aspect / color / upscaling. "
-             "REQUIRED unless --quickstart is used.",
+             "If omitted, runs in QUICKSTART mode (floor defaults from style.md).",
     )
     ap.add_argument(
         "--quickstart",
         action="store_true",
-        help="Explicit escape hatch: render with floor defaults from "
-             "references/_global/style.md (one 9:16 output per clip, neutral grade, "
-             "no upscaling). Use for dev/demo runs with no client references yet.",
+        help="Explicit no-client mode (same as omitting --client). Kept as a "
+             "flag for backward compatibility.",
     )
     ap.add_argument(
         "--no-moment-intelligence",
         action="store_true",
-        help="(Phase 5b) Skip the RAG-driven candidate re-rank step. Pegasus's "
-             "original ordering decides top-N. Useful for A/B comparing reference-"
-             "conditioned selection against generic Pegasus taste.",
+        help="Skip the RAG-driven candidate re-rank step. Pegasus's "
+             "original ordering decides top-N.",
     )
     args = ap.parse_args()
 
     cfg.load_env()
 
-    job = cfg.load_job(args.job)
-
-    if args.source:
-        job.source = args.source
-        if args.source_type:
-            job.source_type = args.source_type
-        else:
-            job.source_type = (
+    # --- 0a. Resolve input: video file or job JSON ---
+    in_path = args.source_or_job
+    if not in_path.exists():
+        sys.exit(f"input not found: {in_path}")
+    if in_path.suffix.lower() == ".json":
+        job = cfg.load_job(in_path)
+        if args.source:
+            job.source = args.source
+            job.source_type = args.source_type or (
                 "youtube" if args.source.startswith(("http://", "https://"))
                 else "local"
             )
-    elif args.source_type:
-        sys.exit("--source-type requires --source")
+    elif in_path.suffix.lower() in VIDEO_SUFFIXES:
+        job = _build_job_from_video(in_path)
+        if args.source:
+            print(f"[cut] WARNING: --source ignored when input is a video file",
+                  file=sys.stderr)
+    else:
+        sys.exit(f"unknown input type {in_path.suffix!r}; expected .json or a "
+                 f"video file ({', '.join(sorted(VIDEO_SUFFIXES))})")
 
     if args.detection_backend:
         job.detection_backend = args.detection_backend
-    if args.top_n:
-        job.top_n = args.top_n
+    if args.no_twelvelabs:
+        job.detection_backend = "local"
 
     job.output_dir.mkdir(parents=True, exist_ok=True)
     job.work_dir.mkdir(parents=True, exist_ok=True)
 
-    # Per-run delivery folder: each invocation gets its own timestamped subdir
-    # so old runs aren't overwritten and side-by-side comparison is possible.
-    # The .work cache stays at job.output_dir/.work (shared across runs).
-    from datetime import datetime as _dt
-    run_id = _dt.now().strftime("%Y-%m-%d_%H-%M-%S")
-    job._delivery_dir = job.output_dir / f"run_{run_id}"
-    job.delivery_dir.mkdir(parents=True, exist_ok=True)
-    print(f"[cut] this run's delivery dir: {job.delivery_dir}", file=sys.stderr)
-
-    if not args.client and not args.quickstart:
-        sys.exit(
-            "no --client supplied. The pipeline is reference-conditioned: "
-            "every run targets a specific client whose references define the "
-            "style. Either:\n"
-            "  • pass --client <name> (requires references/<name>/ already "
-            "ingested via `python -m clip_pipeline.rag.ingest --client <name>`)\n"
-            "  • or pass --quickstart to render with floor defaults from "
-            "references/_global/style.md (dev/demo only)."
-        )
+    # --- 0b. Client / quickstart mode ---
     if args.client and args.quickstart:
         sys.exit("--client and --quickstart are mutually exclusive.")
 
     if args.client:
         profile = profile_mod.load_strict(args.client)
+        client_label = args.client
     else:
         profile = profile_mod.load(None)
         profile.client = "_quickstart"
+        client_label = "_quickstart"
+        print(f"[cut] running in QUICKSTART mode (no --client passed). "
+              f"Using floor defaults from references/_global/style.md. "
+              f"To use a custom client style: ingest references and pass --client <name>.",
+              file=sys.stderr)
 
-    backend = cfg.resolve_detection_backend(job.detection_backend)
-    print(f"[cut] backend={backend}, top_n={job.top_n}, "
-          f"client={profile.client}, aspects={profile.delivery_aspects}, "
-          f"output_dir={job.output_dir}", file=sys.stderr)
+    # --- 0c. Per-source delivery folder ---
+    # Path shape: out/<job.output_dir>/<source_stem>/run_<timestamp>/
+    # So multiple source videos under the same client don't collide, and
+    # multiple runs of the same source are preserved side-by-side.
+    src_path_for_naming = Path(job.source).expanduser()
+    source_stem = (
+        src_path_for_naming.stem
+        if src_path_for_naming.suffix.lower() in VIDEO_SUFFIXES
+        else "remote"
+    )
+    run_id = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    job._delivery_dir = job.output_dir / source_stem / f"run_{run_id}"
+    job.delivery_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[cut] delivery dir: {job.delivery_dir}", file=sys.stderr)
 
-    # 0. Acquire source + detect its shape + probe its quality.
+    # --- 0d. Acquire + probe source ---
     src_path = source.ensure_source(job)
     source_profile = cfg.detect_source_profile(src_path)
     print(f"[cut] source: {src_path} (profile={source_profile})", file=sys.stderr)
-    _probe_source_quality(src_path)
+    src_info = _probe_source(src_path)
+
+    # --- 0e. Smart top_n if not explicitly set ---
+    if args.top_n is not None:
+        if not (1 <= args.top_n <= 10):
+            sys.exit(f"--top-n must be in 1..10 (got {args.top_n})")
+        job.top_n = args.top_n
+        print(f"[cut] top_n = {job.top_n} (from --top-n)", file=sys.stderr)
+    else:
+        job.top_n = src_info.get("recommended_top_n", job.top_n or 3)
+        print(f"[cut] top_n = {job.top_n} (auto from "
+              f"{src_info.get('duration_s', 0):.0f}s source duration)",
+              file=sys.stderr)
+
+    backend = cfg.resolve_detection_backend(job.detection_backend)
+    print(f"[cut] backend={backend}, client={client_label}, "
+          f"aspects={profile.delivery_aspects}",
+          file=sys.stderr)
+
+    # ---- 8-stage pipeline begins ----
+    TOTAL_STAGES = 8
 
     # 1. Whisper full-video transcription.
-    words = whisper.transcribe(job, src_path)
-    print(f"[cut] whisper: {len(words)} words", file=sys.stderr)
+    with _stage("whisper transcription", 1, TOTAL_STAGES):
+        words = whisper.transcribe(job, src_path)
+        print(f"        extracted {len(words)} words", file=sys.stderr)
 
-    # 3. Detection + grading.
-    cands = detect.find_candidates(job, backend, src_path, words)
-    print(f"[cut] {len(cands)} candidates", file=sys.stderr)
+    # 2. Detection + grading.
+    with _stage("candidate detection", 2, TOTAL_STAGES):
+        cands = detect.find_candidates(job, backend, src_path, words)
+        print(f"        {len(cands)} candidates", file=sys.stderr)
     if not cands:
         sys.exit("no candidates produced; refusing to render")
 
-    # 3.5. Phase 5b — Moment Intelligence re-rank. Off in --quickstart mode
-    # (no client refs to compare against) or when explicitly overridden.
-    if args.client and not args.no_moment_intelligence:
-        cands = moment_intelligence.rerank(
-            job, cands, words, args.client, profile,
-        )
+    # 3. Moment Intelligence re-rank.
+    with _stage("moment intelligence re-rank", 3, TOTAL_STAGES):
+        if args.client and not args.no_moment_intelligence:
+            cands = moment_intelligence.rerank(
+                job, cands, words, args.client, profile,
+            )
+        else:
+            reason = "no --client" if not args.client else "--no-moment-intelligence"
+            print(f"        skipped ({reason})", file=sys.stderr)
 
     # 4. Top-N selection.
-    selected = _select_top_n(cands, job.top_n)
-    cfg.cache_write(job.work_dir / "selected.json", selected)
-    print(f"[cut] selected {len(selected)} clips:", file=sys.stderr)
-    for c in selected:
-        print(f"        {c.id}: [{c.start:.1f}-{c.end:.1f}] "
-              f"score={c.score:.2f} {c.rationale}", file=sys.stderr)
+    with _stage("top-N selection", 4, TOTAL_STAGES):
+        selected = _select_top_n(cands, job.top_n)
+        cfg.cache_write(job.work_dir / "selected.json", selected)
 
-    # 4.5. Framing + motion.
-    framings = framing.analyze(job, src_path, selected, source_profile)
+    # 5. Framing + motion.
+    with _stage("framing analysis", 5, TOTAL_STAGES):
+        framings = framing.analyze(job, src_path, selected, source_profile)
 
-    # 4.7. RAG retrieve — per-clip references for grounding editorial decisions.
-    references_by_clip: dict[str, list] = {}
-    if args.client:
-        for c in selected:
-            try:
-                refs = rag_retrieve.retrieve(
-                    client=args.client,
-                    niche=None,
-                    k=5,
-                    query_transcript=c.rationale or c.topic,
-                    query_description=c.rationale or c.topic,
-                )
-            except Exception as e:
-                print(f"[rag] retrieve failed for {c.id}: {e}", file=sys.stderr)
-                refs = []
-            if refs:
-                references_by_clip[c.id] = refs
-                print(f"[rag] {c.id}: retrieved {len(refs)} reference(s) for "
-                      f"client={args.client}", file=sys.stderr)
-        if not references_by_clip:
-            print(f"[rag] client={args.client} has no indexed references; "
-                  f"editorial decisions fall back to profile + global rules",
-                  file=sys.stderr)
+    # 6. Editorial decisions.
+    with _stage("editorial decisions", 6, TOTAL_STAGES):
+        references_by_clip: dict[str, list] = {}
+        if args.client:
+            for c in selected:
+                try:
+                    refs = rag_retrieve.retrieve(
+                        client=args.client,
+                        niche=None,
+                        k=5,
+                        query_transcript=c.rationale or c.topic,
+                        query_description=c.rationale or c.topic,
+                    )
+                except Exception as e:
+                    print(f"[rag] retrieve failed for {c.id}: {e}", file=sys.stderr)
+                    refs = []
+                if refs:
+                    references_by_clip[c.id] = refs
+        decisions = editorial_decisions.decide_all(
+            job, selected, framings,
+            references_by_clip=references_by_clip or None,
+            profile=profile,
+        )
+        recs = editorial_decisions.as_dict(decisions)
 
-    # 4.8. Editorial decisions, grounded in profile + retrieved refs.
-    decisions = editorial_decisions.decide_all(
-        job, selected, framings,
-        references_by_clip=references_by_clip or None,
-        profile=profile,
-    )
-    recs = editorial_decisions.as_dict(decisions)
+    # 7. Render.
+    with _stage(f"render ({len(selected)} clips × {len(profile.delivery_aspects)} aspects)",
+                7, TOTAL_STAGES):
+        produced = render.render_all(job, src_path, words, selected, framings,
+                                     profile, recs)
+        print(f"        produced {len(produced)} MP4s", file=sys.stderr)
 
-    # 5. Render: one MP4 per clip × profile.delivery_aspects.
-    produced = render.render_all(job, src_path, words, selected, framings,
-                                 profile, recs)
-    print(f"[cut] rendered {len(produced)} MP4s", file=sys.stderr)
-
-    # 5.7. Social post copy — REMOVED. Was a Pegasus.analyze call that uses
-    # video_id, deprecated in pegasus1.5. Re-add via the video-object API if
-    # this ever becomes a priority. For now: copy can be written by hand.
-
-    # 6a. Technical verification.
-    report = verify.run(job, produced)
-    print(f"[cut] verify (technical): {report['summary']}", file=sys.stderr)
-
-    # 6b. Editorial verification against profile + global rules.
-    editorial_report = editorial_validate.run(job, produced, decisions,
-                                              profile=profile)
-    print(f"[cut] verify (editorial): {editorial_report['summary']}",
-          file=sys.stderr)
+    # 8. Verification.
+    with _stage("verification (technical + editorial)", 8, TOTAL_STAGES):
+        report = verify.run(job, produced)
+        print(f"        technical: {report['summary']}", file=sys.stderr)
+        editorial_report = editorial_validate.run(job, produced, decisions,
+                                                  profile=profile)
+        print(f"        editorial: {editorial_report['summary']}", file=sys.stderr)
 
     has_failures = bool(report["failures"]) or editorial_report["summary"]["failed"] > 0
 
@@ -312,6 +434,8 @@ def main():
             f"verification failed ({'; '.join(msgs)}); "
             f"see {job.delivery_dir}/report.json and editorial_report.json"
         )
+
+    print(f"\n[cut] done. {len(produced)} clips in {job.delivery_dir}", file=sys.stderr)
 
 
 if __name__ == "__main__":
