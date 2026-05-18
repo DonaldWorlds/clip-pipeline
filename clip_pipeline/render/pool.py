@@ -119,17 +119,22 @@ def _source_aware_brightness_filter(
     clip_path: Path, target: float, cap: float = 0.20,
 ) -> str | None:
     """Compute the actual brightness shift needed to land near `target`
-    given the source's measured mean Y. Caps the shift to ±`cap` so a
-    massive source/target gap can't crush or blow out the image entirely.
-    Returns the ffmpeg `eq=brightness=...` term, or None if the delta is
-    too small to matter (< 0.02)."""
+    given the source's measured mean Y. Caps the shift to ±`cap`.
+
+    Pairs the brightness shift with a saturation BOOST to compensate. Without
+    this, an additive brightness shift flattens RGB channel ratios — measured
+    on user content: shift +0.18 reduced saturation from 88 to 30 (~66% loss),
+    making clips look ashy/washed-out. Saturation boost = 1 + |delta| × 5.0
+    restores the vibrancy at 0..0.20 brightness range. ffmpeg eq=saturation
+    accepts 0.0..3.0 so we stay well within bounds.
+    """
     source_mean = _measure_clip_brightness(clip_path)
-    # ffmpeg eq=brightness is on a -1.0..+1.0 scale that adds to normalized
-    # pixel Y. To shift the source mean toward `target`, delta = (target -
-    # source) / 255 (since brightness is on a 0-1 normalized scale).
     delta = (target - source_mean) / 255.0
     delta = max(-cap, min(cap, delta))
-    return f"eq=brightness={delta:.3f}" if abs(delta) >= 0.02 else None
+    if abs(delta) < 0.02:
+        return None
+    sat = 1.0 + abs(delta) * 5.0
+    return f"eq=brightness={delta:.3f}:saturation={sat:.2f}"
 
 
 def _measure_brightness_at_source(
@@ -157,11 +162,15 @@ def _source_aware_brightness_filter_at_source(
     source: Path, start: float, end: float, target: float, cap: float = 0.20,
 ) -> str | None:
     """Single-pass variant of _source_aware_brightness_filter. Measures the
-    source video directly at [start, end] instead of an extracted clip."""
+    source video directly at [start, end] instead of an extracted clip.
+    Same saturation-boost compensation."""
     source_mean = _measure_brightness_at_source(source, start, end)
     delta = (target - source_mean) / 255.0
     delta = max(-cap, min(cap, delta))
-    return f"eq=brightness={delta:.3f}" if abs(delta) >= 0.02 else None
+    if abs(delta) < 0.02:
+        return None
+    sat = 1.0 + abs(delta) * 5.0
+    return f"eq=brightness={delta:.3f}:saturation={sat:.2f}"
 
 
 # ---------- filter builders ----------
@@ -211,13 +220,7 @@ def _simple_aspect_filter(aspect: str, crop_tightness: float = 0.0,
     win_h = min(win_h, src_h)
 
     win_x = max(0, min(src_w - win_w, cx - win_w / 2))
-
-    # Rule-of-thirds vertical anchor: position the speaker's EYE LINE at
-    # ~37% from the top of the output (premium short-form composition),
-    # NOT dead center. Eyes are at roughly the top 25% of a face/person
-    # bounding box; we want eyes to land at win_y + 0.37 * win_h.
-    eye_y_in_source = speaker_rect["y"] + 0.25 * speaker_rect["h"]
-    win_y = max(0, min(src_h - win_h, eye_y_in_source - 0.37 * win_h))
+    win_y = max(0, min(src_h - win_h, cy - win_h / 2))
 
     return (
         f"crop={int(win_w)}:{int(win_h)}:{int(win_x)}:{int(win_y)},"
@@ -610,7 +613,15 @@ def _prepare_clip_assets(
     """
     use_composite = framing.cls in ("overlay", "multi_subject")
     want_esrgan = profile.use_upscaling and recommendation.get("use_esrgan", False)
-    need_intermediate = use_composite or want_esrgan
+    # T2 SINGLE-PASS DISABLED for now. Regression: the select+setpts inline
+    # trim in the single-pass filter chain caused the ass=<file> burn-in to
+    # silently fail — final MP4s had no captions even though the .ass file
+    # was correctly generated. Until I can isolate why ass+select interact
+    # badly, fall back to the two-pass extract→render path which is known
+    # to preserve captions. The quality lift from single-pass was small
+    # (~3% generation gain); captions are non-negotiable. Set always-True
+    # so we always take the two-pass branch below.
+    need_intermediate = True
 
     if not need_intermediate:
         # T2 SINGLE-PASS: compute retimed words + keep_ranges WITHOUT writing
