@@ -502,5 +502,5 @@ def run(
         "failed": failures,
     }
     payload = {"summary": summary, "reports": [asdict(r) for r in reports]}
-    cache_write(job.output_dir / "editorial_report.json", payload)
+    cache_write(job.delivery_dir / "editorial_report.json", payload)
     return payload

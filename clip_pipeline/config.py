@@ -126,9 +126,24 @@ class Job:
     #    what matches the cached intermediates anyway.
     _source_hash_cache: str | None = field(default=None, repr=False, compare=False)
 
+    # Per-run delivery directory — final MP4s + report JSONs go here.
+    # When set, cut.py points this at `output_dir / f"run_<timestamp>"` so
+    # each invocation has its own delivery folder and old runs are preserved
+    # for comparison. When unset, falls back to `output_dir` (legacy).
+    # The `.work` cache stays at output_dir/.work (shared across runs) so
+    # whisper / detect / rerank caches are reused.
+    _delivery_dir: Path | None = field(default=None, repr=False, compare=False)
+
     @property
     def work_dir(self) -> Path:
         return self.output_dir / ".work"
+
+    @property
+    def delivery_dir(self) -> Path:
+        """Where final MP4s + report JSONs land for THIS run. Defaults to
+        output_dir for backward compatibility; cut.py overrides to a
+        timestamped subdirectory so runs don't overwrite each other."""
+        return self._delivery_dir if self._delivery_dir is not None else self.output_dir
 
     @property
     def source_hash(self) -> str:

@@ -348,7 +348,7 @@ def _render_one(
                     _prepare_clip_assets.
     """
     work = job.work_dir
-    out_dir = job.output_dir
+    out_dir = job.delivery_dir
 
     use_composite = framing.cls in ("overlay", "multi_subject")
     speaker_rect = framing.signals.get("speaker_rect") if isinstance(framing.signals, dict) else None
@@ -672,7 +672,7 @@ def render_all(
     profile: ClientStyleProfile,
     decisions_by_id: dict,
 ) -> list[Path]:
-    job.output_dir.mkdir(parents=True, exist_ok=True)
+    job.delivery_dir.mkdir(parents=True, exist_ok=True)
     job.work_dir.mkdir(parents=True, exist_ok=True)
 
     framing_by_id = {f.id: f for f in framings}

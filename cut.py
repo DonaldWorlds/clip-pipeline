@@ -178,6 +178,15 @@ def main():
     job.output_dir.mkdir(parents=True, exist_ok=True)
     job.work_dir.mkdir(parents=True, exist_ok=True)
 
+    # Per-run delivery folder: each invocation gets its own timestamped subdir
+    # so old runs aren't overwritten and side-by-side comparison is possible.
+    # The .work cache stays at job.output_dir/.work (shared across runs).
+    from datetime import datetime as _dt
+    run_id = _dt.now().strftime("%Y-%m-%d_%H-%M-%S")
+    job._delivery_dir = job.output_dir / f"run_{run_id}"
+    job.delivery_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[cut] this run's delivery dir: {job.delivery_dir}", file=sys.stderr)
+
     if not args.client and not args.quickstart:
         sys.exit(
             "no --client supplied. The pipeline is reference-conditioned: "
@@ -301,7 +310,7 @@ def main():
             msgs.append(f"editorial failures: {editorial_report['summary']['failed']}")
         sys.exit(
             f"verification failed ({'; '.join(msgs)}); "
-            f"see {job.output_dir}/report.json and editorial_report.json"
+            f"see {job.delivery_dir}/report.json and editorial_report.json"
         )
 
 

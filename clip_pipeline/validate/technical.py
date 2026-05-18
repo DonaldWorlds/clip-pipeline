@@ -97,5 +97,5 @@ def run(job: Job, produced: list[Path]) -> dict:
         "ok": len(report["checked"]),
         "failed": len(report["failures"]),
     }
-    cache_write(job.output_dir / "report.json", report)
+    cache_write(job.delivery_dir / "report.json", report)
     return report
