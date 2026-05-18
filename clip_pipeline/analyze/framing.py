@@ -266,9 +266,13 @@ def analyze_clip(source: Path, cand: Candidate, face_cascade, hog) -> Framing:
 
     dropped = frame_diff_mean < FROZEN_FRAME_DIFF
     static = (frame_diff_mean < STATIC_FRAME_DIFF) and (subj_var < STATIC_SUBJECT_VAR)
-    # Zoom is only safe on full-frame content. Don't zoom overlays (would crop
-    # the overlay) or multi-subject (would crop someone out).
-    zoom_enabled = static and cls in ("full_frame", "mid_shot") and not dropped
+    # Ken Burns zoom DISABLED. The slow 1.02→1.08× zoom over a 15s clip
+    # looked subtly jittery on the user's content — the brain reads the
+    # constant micro-motion as camera shake rather than intentional zoom.
+    # Safer to ship a static frame and let the speaker's natural motion
+    # carry the clip. Re-enable via a profile flag if a client's references
+    # actually use Ken Burns.
+    zoom_enabled = False
 
     signals = {
         "face_observations": len(face_obs),

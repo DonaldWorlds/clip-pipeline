@@ -295,6 +295,20 @@ def _zoompan_filter(framing: Framing, fps: float, duration: float,
     )
 
 
+def _final_4k_scale(aspect: str) -> str:
+    """Final upscale step appended after captions burn in. Pipeline operates
+    at 1080p internally (1080×1920, 1080×1080, or 1920×1080); this filter
+    lifts the rendered frame to 4K for delivery via Lanczos. ~2× linear,
+    ~4× pixel count — file sizes grow accordingly."""
+    if aspect == "9:16":
+        return "scale=2160:3840:flags=lanczos"
+    if aspect == "1:1":
+        return "scale=2160:2160:flags=lanczos"
+    if aspect == "16:9":
+        return "scale=3840:2160:flags=lanczos"
+    raise ValueError(f"unknown aspect for 4K upscale: {aspect!r}")
+
+
 def _unsharp_filter(strength: float) -> str | None:
     if strength <= 0:
         return None
@@ -444,6 +458,12 @@ def _render_one(
         # saturation alone gives a cleaner result. Reachable via
         # build_premium_curve() if profile-driven curves get added later.
         filters.append(f"ass={_escape_ass_filter_path(ass_path)}")
+        # 4K upscale after captions burn in. Pipeline runs at 1080p internally
+        # (so filters + ASS PlayRes math stays simple); final scale uses Lanczos
+        # to lift the rendered frame to 2160×3840 for delivery. ASS captions
+        # get upscaled along with the image but Lanczos preserves text edges
+        # well enough that they read clean on 4K playback.
+        filters.append(_final_4k_scale(aspect))
         vf = ",".join(filters)
 
         af_parts = []
@@ -494,6 +514,7 @@ def _render_one(
             suffix_filters.append(bright_f)
         # Premium curve disabled — see comment above the simple-aspect path.
         suffix_filters.append(f"ass={_escape_ass_filter_path(ass_path)}")
+        suffix_filters.append(_final_4k_scale(aspect))
         vf += ";[outv]" + ",".join(suffix_filters) + "[final]"
 
         cmd = ["ffmpeg", "-y", "-i", str(clip_path)]
@@ -550,6 +571,8 @@ def _render_one(
         # produced a milky/ashy look on the user's source. Brightness +
         # saturation alone gives a cleaner result.
         filters.append(f"ass={_escape_ass_filter_path(ass_path)}")
+        # 4K upscale after captions. Pipeline runs at 1080p internally.
+        filters.append(_final_4k_scale(aspect))
         vf = ",".join(filters)
 
         if use_enhanced_source:
