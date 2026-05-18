@@ -26,6 +26,7 @@ from ..config import (
     Job,
     Word,
     aspect_slug,
+    cache_write,
 )
 from ..analyze.whisper import words_in_range
 from ..profile import ClientStyleProfile
