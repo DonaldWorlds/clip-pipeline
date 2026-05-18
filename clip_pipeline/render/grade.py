@@ -52,3 +52,23 @@ def build_grade_filter(grade: ColorGrade) -> str | None:
     if not parts:
         return None
     return ",".join(parts)
+
+
+# Premium tone curve — the "cinematic short-form" look:
+#   - shadows lifted from 25% → 30%  (preserves shadow detail, less crushy)
+#   - midtones preserved (0.5/0.5)
+#   - highlights rolled off softly  (75% → 72%)
+#   - max white pulled to 96%       (prevents harsh clipping on bright lamps,
+#                                    skin highlights, window blowouts)
+# Subtle enough to read as "graded" rather than "stylized." Apply AFTER the
+# source-aware brightness shift so the curve shapes the already-lifted image.
+PREMIUM_TONE_CURVE = (
+    "curves=master='0/0 0.25/0.30 0.5/0.5 0.75/0.72 1/0.96'"
+)
+
+
+def build_premium_curve() -> str:
+    """Premium tone curve filter expression. Always-on for now; could be
+    gated on a profile flag in the future. Slots in AFTER the source-aware
+    brightness shift, BEFORE the captions burn-in."""
+    return PREMIUM_TONE_CURVE

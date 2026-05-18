@@ -30,7 +30,7 @@ from ..config import (
 from ..analyze.whisper import words_in_range
 from ..profile import ClientStyleProfile
 from .enhance import enhance_speaker_region
-from .grade import build_grade_filter
+from .grade import build_grade_filter, build_premium_curve
 from .trim import prepare_trimmed_clip
 
 
@@ -178,7 +178,13 @@ def _simple_aspect_filter(aspect: str, crop_tightness: float = 0.0,
     win_h = min(win_h, src_h)
 
     win_x = max(0, min(src_w - win_w, cx - win_w / 2))
-    win_y = max(0, min(src_h - win_h, cy - win_h / 2))
+
+    # Rule-of-thirds vertical anchor: position the speaker's EYE LINE at
+    # ~37% from the top of the output (premium short-form composition),
+    # NOT dead center. Eyes are at roughly the top 25% of a face/person
+    # bounding box; we want eyes to land at win_y + 0.37 * win_h.
+    eye_y_in_source = speaker_rect["y"] + 0.25 * speaker_rect["h"]
+    win_y = max(0, min(src_h - win_h, eye_y_in_source - 0.37 * win_h))
 
     return (
         f"crop={int(win_w)}:{int(win_h)}:{int(win_x)}:{int(win_y)},"
@@ -347,6 +353,7 @@ def _render_one(
         bright_f = _source_aware_brightness_filter(clip_path, brightness_target)
         if bright_f:
             suffix_filters.append(bright_f)
+        suffix_filters.append(build_premium_curve())
         suffix_filters.append(f"ass={_escape_ass_filter_path(ass_path)}")
         vf += ";[outv]" + ",".join(suffix_filters) + "[final]"
 
@@ -358,7 +365,9 @@ def _render_one(
             "-map", "[final]",
             "-map", "0:a",
             "-af", LOUDNORM_FILTER,
-            "-c:v", "libx264", "-preset", "medium", "-crf", str(crf),
+            "-c:v", "libx264", "-preset", "medium",
+            "-crf", str(max(15, crf - 2)),
+            "-maxrate", "14M", "-bufsize", "20M",
             "-pix_fmt", "yuv420p",
             "-c:a", "aac", "-b:a", "192k",
             "-movflags", "+faststart",
@@ -398,6 +407,9 @@ def _render_one(
         bright_f = _source_aware_brightness_filter(clip_path, brightness_target)
         if bright_f:
             filters.append(bright_f)
+        # Premium tone curve — applied AFTER brightness lift so it shapes
+        # the already-lifted image (lifted shadows + soft highlight rolloff).
+        filters.append(build_premium_curve())
         filters.append(f"ass={_escape_ass_filter_path(ass_path)}")
         vf = ",".join(filters)
 
@@ -412,7 +424,9 @@ def _render_one(
                 "-map", "0:v",
                 "-map", "1:a",
                 "-af", LOUDNORM_FILTER,
-                "-c:v", "libx264", "-preset", "medium", "-crf", str(crf),
+                "-c:v", "libx264", "-preset", "medium",
+                "-crf", str(max(15, crf - 2)),
+                "-maxrate", "14M", "-bufsize", "20M",
                 "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-b:a", "192k",
                 "-movflags", "+faststart",
@@ -424,7 +438,9 @@ def _render_one(
                 "-i", str(clip_path),
                 "-vf", vf,
                 "-af", LOUDNORM_FILTER,
-                "-c:v", "libx264", "-preset", "medium", "-crf", str(crf),
+                "-c:v", "libx264", "-preset", "medium",
+                "-crf", str(max(15, crf - 2)),
+                "-maxrate", "14M", "-bufsize", "20M",
                 "-pix_fmt", "yuv420p",
                 "-c:a", "aac", "-b:a", "192k",
                 "-movflags", "+faststart",

@@ -36,6 +36,61 @@ from clip_pipeline.validate import editorial as editorial_validate
 from clip_pipeline.validate import technical as verify
 
 
+def _probe_source_quality(src_path: Path) -> None:
+    """Print source video/audio specs at startup. Warns if the source is
+    below thresholds that limit output quality (resolution, bitrate, audio
+    spec). Diagnostic only — does not refuse to render. Helps the operator
+    set client expectations: low-quality input → limits on output quality."""
+    import subprocess
+    import json as _json
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-print_format", "json",
+             "-show_format", "-show_streams", str(src_path)],
+            capture_output=True, text=True, check=True,
+        )
+        data = _json.loads(result.stdout)
+    except Exception as e:
+        print(f"[source] quality probe failed: {e}", file=sys.stderr)
+        return
+
+    v = next((s for s in data.get("streams", []) if s.get("codec_type") == "video"), None)
+    a = next((s for s in data.get("streams", []) if s.get("codec_type") == "audio"), None)
+    fmt = data.get("format", {})
+    total_kbps = int(fmt.get("bit_rate", 0)) // 1000
+
+    if v:
+        w = int(v.get("width", 0))
+        h = int(v.get("height", 0))
+        codec = v.get("codec_name", "?")
+        fps_str = v.get("r_frame_rate", "0/1")
+        try:
+            num, den = fps_str.split("/")
+            fps = round(float(num) / float(den), 1) if float(den) else 0
+        except (ValueError, ZeroDivisionError):
+            fps = 0
+        print(f"[source] video: {w}x{h} {codec} @ {fps}fps, "
+              f"total bitrate ~{total_kbps}kbps", file=sys.stderr)
+        if h < 720:
+            print(f"[source] WARNING: source is {h}p (< 720p). Output quality "
+                  f"will be limited by source resolution.", file=sys.stderr)
+        if total_kbps and total_kbps < 2000:
+            print(f"[source] WARNING: total bitrate {total_kbps}kbps is below "
+                  f"2000kbps — likely visible compression artifacts.", file=sys.stderr)
+
+    if a:
+        codec = a.get("codec_name", "?")
+        sr = a.get("sample_rate", "?")
+        ch = a.get("channels", 0)
+        a_kbps = int(a.get("bit_rate", 0)) // 1000
+        print(f"[source] audio: {codec} {ch}ch @ {sr}Hz, ~{a_kbps}kbps",
+              file=sys.stderr)
+        if a_kbps and a_kbps < 96:
+            print(f"[source] WARNING: audio bitrate {a_kbps}kbps is below "
+                  f"96kbps — captions will be fine but audio fidelity is low.",
+                  file=sys.stderr)
+
+
 def _select_top_n(cands, n: int):
     """Pick the top-N candidates by final_score, then renumber them
     sequentially (01, 02, 03, ...) for clean output filenames.
@@ -147,10 +202,11 @@ def main():
           f"client={profile.client}, aspects={profile.delivery_aspects}, "
           f"output_dir={job.output_dir}", file=sys.stderr)
 
-    # 0. Acquire source + detect its shape.
+    # 0. Acquire source + detect its shape + probe its quality.
     src_path = source.ensure_source(job)
     source_profile = cfg.detect_source_profile(src_path)
     print(f"[cut] source: {src_path} (profile={source_profile})", file=sys.stderr)
+    _probe_source_quality(src_path)
 
     # 1. Whisper full-video transcription.
     words = whisper.transcribe(job, src_path)
