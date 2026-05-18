@@ -159,15 +159,25 @@ def _smart_top_n(duration_s: float) -> int:
 # Job construction
 # ============================================================
 
-def _build_job_from_video(video_path: Path) -> cfg.Job:
-    """Auto-build a Job dataclass for a direct video file input. Used when
-    the user runs `cut.py video.mp4` instead of `cut.py jobs/foo.json`.
-    output_dir is derived from the video's stem so multiple sources don't
-    collide in one folder."""
+def _build_job_from_video(video_path: Path, client: str | None = None) -> cfg.Job:
+    """Auto-build a Job dataclass for a direct video file input.
+
+    Output directory rule:
+      - With --client X: output_dir = out/<client>. Multiple sources under
+        the same client share one .work cache (candidates/whisper survive
+        across runs), so re-running on the same source produces the SAME
+        clips. This matches the legacy JSON-job behavior.
+      - Without --client: output_dir = out/<video_stem>. No client context,
+        so the video name organizes outputs on its own.
+    """
+    if client:
+        output_dir = Path("out") / client
+    else:
+        output_dir = Path("out") / video_path.stem
     return cfg.Job(
         source=str(video_path.expanduser().resolve()),
         source_type="local",
-        output_dir=Path("out") / video_path.stem,
+        output_dir=output_dir,
         top_n=3,  # will be overridden later by smart_top_n or --top-n flag
         detection_backend="auto",
         whisper_model="small",
@@ -274,7 +284,7 @@ def main():
                 else "local"
             )
     elif in_path.suffix.lower() in VIDEO_SUFFIXES:
-        job = _build_job_from_video(in_path)
+        job = _build_job_from_video(in_path, client=args.client)
         job_auto_built = True
         if args.source:
             print(f"[cut] WARNING: --source ignored when input is a video file",
@@ -319,13 +329,16 @@ def main():
         else "remote"
     )
     run_id = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    # Skip the source_stem inner folder when the job was AUTO-built from a
-    # video path — the source_stem is already in job.output_dir (`out/<stem>`),
-    # nesting it again produces `out/<stem>/<stem>/run_<ts>` which was the
-    # double-nesting bug. When the job came from a JSON file, output_dir is
-    # client-named (`out/phone_creator`) and we DO want source_stem nesting
-    # so multiple sources don't collide.
-    if job_auto_built:
+    # Source-stem nesting rule:
+    #   - Auto-built WITHOUT --client: output_dir already includes video stem
+    #     (out/<stem>), don't nest it again
+    #   - Auto-built WITH --client: output_dir is the client folder
+    #     (out/<client>), nest video stem inside → matches JSON-job behavior
+    #     AND reuses the same .work cache across runs of the same source
+    #     under the same client (so candidates stay consistent)
+    #   - JSON job: output_dir is whatever job says (typically client-named),
+    #     nest video stem inside
+    if job_auto_built and not args.client:
         job._delivery_dir = job.output_dir / f"run_{run_id}"
     else:
         job._delivery_dir = job.output_dir / source_stem / f"run_{run_id}"
